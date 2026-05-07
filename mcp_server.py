@@ -2,7 +2,6 @@ import asyncio
 import json
 import sys
 import os
-from datetime import datetime, timezone, timedelta
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
@@ -11,12 +10,11 @@ sys.path.insert(0, parent_dir)
 from stock_pool import StockDataPool
 
 pool = StockDataPool()
-SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 TOOLS = [
     {
         "name": "get_current_time",
-        "description": "获取当前准确时间，默认返回北京时间（Asia/Shanghai），便于确定数据分析截止日期",
+        "description": "【强制前置工具】每次股票分析任务开始前必须先调用本工具获取准确北京时间（Asia/Shanghai）、交易日/交易时段状态，并以返回的 date 作为默认分析截止日期",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -60,7 +58,7 @@ TOOLS = [
     },
     {
         "name": "get_daily_data",
-        "description": "获取指定股票的日K线数据；服务会优先使用缓存，若需分析新股票，请先调用 update_stock/update_stocks 更新缓存",
+        "description": "获取指定股票的日K线数据；每次任务前必须先调用 get_current_time。若查询范围涉及当前日期，服务会在缓存基础上自动补充实时行情，避免当日数据滞后",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -100,7 +98,7 @@ TOOLS = [
     },
     {
         "name": "get_latest_data",
-        "description": "获取给定股票列表的最新综合数据；服务会优先使用缓存，仅返回已有可用数据的股票，不会自动扩展到全市场",
+        "description": "获取给定股票列表的最新综合数据；每次任务前必须先调用 get_current_time。服务会在缓存基础上自动补充实时行情作为当日/最新价格，不会自动扩展到全市场",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -210,17 +208,9 @@ TOOLS = [
 def handle_tool_call(name, arguments):
     try:
         if name == "get_current_time":
-            now = datetime.now(SHANGHAI_TZ)
             return {
                 "success": True,
-                "data": {
-                    "timezone": "Asia/Shanghai",
-                    "utc_offset": "+08:00",
-                    "datetime": now.isoformat(timespec="seconds"),
-                    "date": now.date().isoformat(),
-                    "time": now.time().isoformat(timespec="seconds"),
-                    "timestamp": int(now.timestamp())
-                }
+                "data": pool.get_current_time_info()
             }
 
         elif name == "update_stock":

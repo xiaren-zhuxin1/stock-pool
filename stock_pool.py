@@ -1,6 +1,6 @@
 ﻿import sqlite3
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 import math
@@ -18,6 +18,7 @@ except ImportError:
     from api_provider import StockAPIProvider
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock_pool.db')
+SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
 class StockDataPool:
     
@@ -35,6 +36,82 @@ class StockDataPool:
     
     def _connect(self):
         return sqlite3.connect(self.db_path, uri=self._sqlite_uri)
+
+    @staticmethod
+    def get_current_time_info(now=None):
+        """返回 Agent 分析前必须使用的北京时间与 A 股交易时段状态。"""
+        if now is None:
+            now = datetime.now(SHANGHAI_TZ)
+        elif now.tzinfo is None:
+            now = now.replace(tzinfo=SHANGHAI_TZ)
+        else:
+            now = now.astimezone(SHANGHAI_TZ)
+
+        minutes = now.hour * 60 + now.minute
+        is_trading_day = now.weekday() < 5
+        is_trading_time = is_trading_day and ((9 * 60 + 30 <= minutes <= 11 * 60 + 30) or (13 * 60 <= minutes <= 15 * 60))
+
+        if not is_trading_day:
+            trading_session = 'non_trading_day'
+        elif minutes < 9 * 60 + 30:
+            trading_session = 'pre_market'
+        elif 9 * 60 + 30 <= minutes <= 11 * 60 + 30:
+            trading_session = 'morning_trading'
+        elif minutes < 13 * 60:
+            trading_session = 'lunch_break'
+        elif 13 * 60 <= minutes <= 15 * 60:
+            trading_session = 'afternoon_trading'
+        else:
+            trading_session = 'after_market'
+
+        return {
+            'timezone': 'Asia/Shanghai',
+            'utc_offset': '+08:00',
+            'datetime': now.isoformat(timespec='seconds'),
+            'date': now.date().isoformat(),
+            'time': now.time().isoformat(timespec='seconds'),
+            'timestamp': int(now.timestamp()),
+            'is_trading_day': is_trading_day,
+            'is_trading_time': is_trading_time,
+            'trading_session': trading_session,
+            'agent_rule': '每次股票分析任务开始前必须先调用 get_current_time，并以 date 作为默认分析截止日期；涉及当日数据时需结合 is_trading_time/trading_session 判断是否需要实时行情。'
+        }
+
+    def _request_includes_today(self, start_date=None, end_date=None):
+        today = self.get_current_time_info()['date']
+        if start_date and start_date > today:
+            return False
+        if end_date and end_date < today:
+            return False
+        return True
+
+    def _merge_realtime_snapshot(self, item, realtime, time_info):
+        if not realtime or not realtime.get('success'):
+            item.update({
+                'realtime_used': False,
+                'realtime_error': realtime.get('message') if realtime else '实时行情 API 未返回数据',
+                'time_context': time_info,
+            })
+            return item
+
+        realtime_price = realtime.get('price')
+        item.update({
+            'realtime_used': True,
+            'realtime_price': realtime_price,
+            'effective_close': realtime_price if realtime_price is not None else item.get('close'),
+            'effective_price_source': 'realtime' if realtime_price is not None else 'cache',
+            'realtime_api': realtime.get('api_name') or realtime.get('data_source'),
+            'realtime_fetched_at': realtime.get('fetched_at'),
+            'time_context': time_info,
+        })
+
+        for key in ['pe_ttm', 'pe_lyr', 'pb', 'market_cap', 'circ_market_cap', 'data_quality', 'missing_fields']:
+            if realtime.get(key) is not None:
+                item[key] = realtime.get(key)
+
+        if realtime.get('name') and not item.get('name'):
+            item['name'] = realtime.get('name')
+        return item
     
     def _init_db(self):
         conn = self._connect()
@@ -236,7 +313,7 @@ class StockDataPool:
         return None
     
     def get_realtime_price(self, code):
-        """直接从外部行情 API 获取实时价格，不读取或写入 SQLite 缓存。"""
+        """直接从外部行情 API 获取实时价格，不读取或写入服务缓存。"""
         realtime, api_name = self.api.fetch_realtime(code)
         if not realtime:
             return {
@@ -252,12 +329,12 @@ class StockDataPool:
             'code': code,
             'api_name': api_name,
             'cache_used': False,
-            'fetched_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'fetched_at': self.get_current_time_info()['datetime'],
         })
         return realtime
     
     def get_realtime_prices(self, codes, delay=0.2):
-        """批量直接从外部行情 API 获取实时价格，不读取或写入 SQLite 缓存。"""
+        """批量直接从外部行情 API 获取实时价格，不读取或写入服务缓存。"""
         results = []
         for code in codes:
             results.append(self.get_realtime_price(code))
@@ -580,7 +657,7 @@ class StockDataPool:
             }
         return None
     
-    def get_daily_data(self, code, start_date=None, end_date=None, limit=None):
+    def get_daily_data(self, code, start_date=None, end_date=None, limit=None, include_realtime=True):
         limit = self._normalize_limit(limit)
         conn = self._connect()
         cursor = conn.cursor()
@@ -605,7 +682,7 @@ class StockDataPool:
         rows = cursor.fetchall()
         conn.close()
         
-        return [{
+        data = [{
             'code': r[1],
             'date': r[2],
             'open': r[3],
@@ -615,6 +692,25 @@ class StockDataPool:
             'volume': r[7],
             'amount': r[8],
         } for r in rows]
+
+        if include_realtime and self._request_includes_today(start_date, end_date):
+            time_info = self.get_current_time_info()
+            realtime = self.get_realtime_price(code)
+            if data:
+                data[0] = self._merge_realtime_snapshot(data[0], realtime, time_info)
+            else:
+                data.append(self._merge_realtime_snapshot({
+                    'code': code,
+                    'date': time_info['date'],
+                    'open': None,
+                    'high': None,
+                    'low': None,
+                    'close': None,
+                    'volume': None,
+                    'amount': None,
+                }, realtime, time_info))
+
+        return data
     
     def get_valuation_data(self, code, start_date=None, end_date=None):
         conn = self._connect()
@@ -738,7 +834,7 @@ class StockDataPool:
                 
                 valuation_row = cursor.fetchone()
                 
-                results.append({
+                item = {
                     'code': row[0],
                     'name': row[1],
                     'market': row[2],
@@ -753,7 +849,11 @@ class StockDataPool:
                     'position_pct': row[5],
                     'high_52w': row[6],
                     'low_52w': row[7],
-                })
+                }
+
+                time_info = self.get_current_time_info()
+                realtime = self.get_realtime_price(code)
+                results.append(self._merge_realtime_snapshot(item, realtime, time_info))
         
         conn.close()
         return results
@@ -902,19 +1002,11 @@ class StockDataPool:
                     print(f"  数据已是历史数据（{latest_time_str}），跳过更新")
                     return
                 
-                now = datetime.now()
+                now = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
                 latest_time = datetime.strptime(latest_time_str, '%Y-%m-%d %H:%M')
                 minutes_diff = (now - latest_time).total_seconds() / 60
-                
-                current_hour = now.hour
-                current_minute = now.minute
-                
-                is_trading_time = (
-                    (9 <= current_hour < 12) or 
-                    (current_hour == 12 and current_minute <= 0) or
-                    (13 <= current_hour < 15) or
-                    (current_hour == 15 and current_minute == 0)
-                )
+
+                is_trading_time = self.get_current_time_info()['is_trading_time']
                 
                 if not is_trading_time:
                     print(f"  当前非交易时间，数据已是最新（{latest_time_str}），跳过更新")

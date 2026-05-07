@@ -8,7 +8,8 @@
 - 多表设计：基本信息、日K线、估值、财务、资金流向、技术指标、分钟K线
 - 自动检查数据完整性，只拉取缺失数据
 - 实时行情工具直接调用外部API，不使用服务缓存
-- 提供当前时间工具，便于AI Agent确定数据分析截止日期
+- 提供当前时间工具，便于AI Agent确定数据分析截止日期与A股交易时段
+- 当日/最新数据查询会在内部缓存基础上自动补充实时行情，降低盘中或收盘后当日数据滞后风险
 - 支持52周滚动位置分析、估值分析
 - 支持常用技术指标：MA、EMA、MACD、RSI、KDJ、BOLL、ATR、OBV
 - 提供MCP服务器，支持AI模型直接调用
@@ -155,16 +156,34 @@ python mcp_server.py
 
 #### MCP工具列表
 
+> Agent 使用规则：每次股票分析任务开始前必须先调用 `get_current_time`，以返回的 `date` 作为默认分析截止日期，并结合 `is_trading_time` / `trading_session` 判断是否正在交易、是否需要关注实时行情。
+
+`get_current_time` 返回字段包括：
+
+- `datetime` / `date` / `time`：北京时间（Asia/Shanghai）
+- `timestamp`：Unix 时间戳
+- `is_trading_day`：是否为工作日交易日（不含节假日日历判断）
+- `is_trading_time`：是否处于 A 股连续竞价交易时段（09:30-11:30 或 13:00-15:00）
+- `trading_session`：`pre_market`、`morning_trading`、`lunch_break`、`afternoon_trading`、`after_market`、`non_trading_day`
+
+当 `get_daily_data` 的查询范围包含当前日期，或调用 `get_latest_data` 获取最新综合数据时，服务会尝试直连实时行情 API 补充：
+
+- `realtime_used`：是否成功使用实时行情
+- `realtime_price`：实时价格
+- `effective_close`：分析推荐优先使用的有效价格（实时价优先，否则缓存收盘价）
+- `effective_price_source`：`realtime` 或 `cache`
+- `time_context`：本次数据对应的当前时间与交易时段上下文
+
 | 工具 | 说明 |
 |------|------|
-| get_current_time | 获取当前北京时间（Asia/Shanghai），用于确定分析截止日期 |
+| get_current_time | 强制前置工具；获取当前北京时间、交易日/交易时段状态，用于确定分析截止日期 |
 | update_stock | 按给定代码更新单只股票服务缓存，不自动枚举全市场 |
 | update_stocks | 按给定代码列表批量更新股票服务缓存，不自动枚举全市场 |
 | get_stock_info | 获取股票基本信息，服务优先使用缓存 |
-| get_daily_data | 获取日K线，服务优先使用缓存 |
+| get_daily_data | 获取日K线；若查询范围涉及今天，会在缓存基础上自动补充实时行情 |
 | get_valuation_data | 获取估值数据，服务优先使用缓存 |
 | get_technical_data | 获取技术指标，服务优先使用缓存 |
-| get_latest_data | 获取给定代码列表的最新数据，服务优先使用缓存 |
+| get_latest_data | 获取给定代码列表的最新数据，会在缓存基础上自动补充实时行情 |
 | get_realtime_price | 实时获取单只股票当前价格，直连外部API，不使用服务缓存 |
 | get_realtime_prices | 批量实时获取股票当前价格，直连外部API，不使用服务缓存 |
 | analyze_position | 基于给定代码列表的可用历史数据分析52周位置，不是全市场筛选器 |
