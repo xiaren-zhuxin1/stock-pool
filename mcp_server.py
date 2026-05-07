@@ -20,7 +20,7 @@ TOOLS = [
             "properties": {
                 "code": {"type": "string", "description": "股票代码，如 601138"},
                 "days": {"type": "integer", "description": "拉取天数，默认250", "default": 250},
-                "force": {"type": "boolean", "description": "强制更新，忽略缓存", "default": false}
+                "force": {"type": "boolean", "description": "强制更新，忽略缓存", "default": False}
             },
             "required": ["code"]
         }
@@ -140,7 +140,7 @@ TOOLS = [
                 "code": {"type": "string", "description": "股票代码，如 603993"},
                 "klt": {"type": "integer", "description": "K线类型：1=1分钟，5=5分钟，15=15分钟，30=30分钟，60=60分钟", "default": 5},
                 "days": {"type": "integer", "description": "拉取天数，默认5", "default": 5},
-                "force": {"type": "boolean", "description": "强制更新，忽略缓存", "default": false}
+                "force": {"type": "boolean", "description": "强制更新，忽略缓存", "default": False}
             },
             "required": ["code"]
         }
