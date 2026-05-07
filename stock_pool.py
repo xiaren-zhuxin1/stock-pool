@@ -6,6 +6,12 @@ import sys
 import math
 import builtins
 
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        pass
+
 
 def print(*args, **kwargs):
     """项目日志统一输出到 stderr，避免 MCP stdout JSON-RPC 通道被污染。"""
@@ -284,7 +290,6 @@ class StockDataPool:
         
         conn.commit()
         conn.close()
-        print("服务缓存初始化完成")
 
     @staticmethod
     def _json_dumps(value):

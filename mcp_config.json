@@ -3,7 +3,10 @@
     "stock-pool": {
       "command": "python",
       "args": ["mcp_server.py"],
-      "env": {}
+      "cwd": ".",
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
     }
   }
 }
