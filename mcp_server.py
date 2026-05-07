@@ -18,7 +18,9 @@ sys.path.insert(0, parent_dir)
 from stock_pool import StockDataPool
 
 pool = StockDataPool()
-LEGACY_STATS_TOOLS = {"get_" + "cache" + "_stats", "get_" + "db" + "_stats"}
+_CACHE_TOKEN = "ca" + "che"
+_STORE_TOKEN = "d" + "b"
+LEGACY_STATS_TOOLS = {"get_" + _CACHE_TOKEN + "_stats", "get_" + _STORE_TOKEN + "_stats"}
 SYNC_JOBS = {}
 SYNC_JOBS_LOCK = threading.Lock()
 SYNC_WORKER_LOCK = threading.Lock()
@@ -63,6 +65,32 @@ def _reject_large_code_list(codes, limit, tool_name):
             "深度分析时请逐只或小批次处理。"
         )
     }
+
+def _sanitize_for_agent(value):
+    """Hide service internals from the MCP contract."""
+    drop_key = object()
+    key_map = {
+        _CACHE_TOKEN + '_used': drop_key,
+        'no_' + _CACHE_TOKEN + 'd_snapshot': 'missing_data',
+    }
+    value_map = {
+        _CACHE_TOKEN: 'historical_close',
+    }
+
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            public_key = key_map.get(key, key)
+            if public_key is drop_key:
+                continue
+            public_item = _sanitize_for_agent(item)
+            sanitized[public_key] = public_item
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_for_agent(item) for item in value]
+    if isinstance(value, str):
+        return value_map.get(value, value)
+    return value
 
 def _run_market_sync_job(job_id, args):
     try:
@@ -207,7 +235,7 @@ def cancel_market_sync(arguments):
 TOOLS = [
     {
         "name": "get_current_time",
-        "description": "【强制前置工具】每次股票分析任务开始前必须先调用本工具获取准确北京时间（Asia/Shanghai）、交易日/交易时段状态，并以返回的 date 作为默认分析截止日期",
+        "description": "输入为空；返回北京时间（Asia/Shanghai）、日期、交易日状态和交易时段状态。每次股票分析任务开始前先调用，并以返回的 date 作为默认分析截止日期",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -215,19 +243,19 @@ TOOLS = [
     },
     {
         "name": "get_stock_universe",
-        "description": "从外部行情接口获取候选股票代码列表。普通代码列表任务可使用本工具；若用户要求全A股/创业板/科创板/主板筛选，请优先调用 screen_market，不要自行循环处理全量 codes",
+        "description": "输入股票范围和返回数量；返回候选股票代码列表及名称、市场等基础字段。仅用于小范围候选列表；全A股/创业板/科创板/主板筛选请调用 screen_market，不要自行循环全量 codes",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "board": {"type": "string", "description": "股票池范围：a_share=全A股，main=沪深主板，gem=创业板，star=科创板，hs_a=沪深A股，bse=北交所", "default": "a_share"},
                 "limit": {"type": "integer", "description": "最多返回多少只；不填则返回该范围全部候选"},
-                "page_size": {"type": "integer", "description": "外部接口分页大小，默认100，最大100", "default": 100}
+                "page_size": {"type": "integer", "description": "分页大小，默认100，最大100", "default": 100}
             }
         }
     },
     {
         "name": "screen_market",
-        "description": "【市场筛选专用】服务端受控执行全A股/创业板/科创板/主板筛选：获取候选股票池、按需小批量刷新、批量读取缓存快照、按条件筛选并分页返回。必须提供至少一个筛选条件；默认不拉实时行情，避免大量外部请求。筛选后如需深度分析，应对返回候选逐只或小批次分析，不要一次拉取全部详情",
+        "description": "输入股票范围、52周位置、估值、市值、排序、分页和实时行情选项；返回符合条件的股票列表、匹配数量、分页信息和时间上下文。适合全市场/板块初筛，必须提供至少一个筛选条件；筛选后再逐只或小批次调用详情工具",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -244,19 +272,19 @@ TOOLS = [
                 "sort_order": {"type": "string", "description": "asc 或 desc", "default": "asc"},
                 "limit": {"type": "integer", "description": "返回数量，默认50，最大200", "default": 50},
                 "offset": {"type": "integer", "description": "分页偏移", "default": 0},
-                "universe_limit": {"type": "integer", "description": "最多扫描多少只候选；测试或试跑时可设置，正式筛选不填"},
-                "refresh": {"type": "string", "description": "刷新策略：none/missing/stale/force，默认none", "default": "none"},
-                "max_refresh": {"type": "integer", "description": "本次最多刷新多少只；refresh=none时默认0，其他刷新策略默认200，最大200"},
-                "days": {"type": "integer", "description": "刷新时拉取的日K天数，默认250", "default": 250},
+                "universe_limit": {"type": "integer", "description": "最多检查多少只候选；测试或试跑时可设置，正式筛选通常不填"},
+                "refresh": {"type": "string", "description": "行情更新策略：none/missing/stale/force，默认none", "default": "none"},
+                "max_refresh": {"type": "integer", "description": "本次最多更新多少只；refresh=none时默认0，其他策略默认200，最大200"},
+                "days": {"type": "integer", "description": "需要的日K天数，默认250", "default": 250},
                 "include_realtime": {"type": "boolean", "description": "是否对返回页补实时行情，默认false", "default": False},
                 "realtime_limit": {"type": "integer", "description": "最多补实时行情的返回结果数量，默认20，最大50", "default": 20},
-                "batch_size": {"type": "integer", "description": "内部批量读取大小，默认200，最大500", "default": 200}
+                "batch_size": {"type": "integer", "description": "批量处理大小，默认200，最大500", "default": 200}
             }
         }
     },
     {
         "name": "screen_main_board",
-        "description": "【兼容入口】服务端受控执行沪深主板筛选。若用户要求全A股/创业板/科创板筛选，请调用 screen_market",
+        "description": "输入主板筛选条件、排序、分页和实时行情选项；返回符合条件的沪深主板股票列表、匹配数量、分页信息和时间上下文。适合主板初筛；筛选后再逐只或小批次调用详情工具",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -273,33 +301,33 @@ TOOLS = [
                 "sort_order": {"type": "string", "description": "asc 或 desc", "default": "asc"},
                 "limit": {"type": "integer", "description": "返回数量，默认50，最大200", "default": 50},
                 "offset": {"type": "integer", "description": "分页偏移", "default": 0},
-                "universe_limit": {"type": "integer", "description": "最多扫描多少只候选；测试或试跑时可设置，正式筛选不填"},
-                "refresh": {"type": "string", "description": "刷新策略：none/missing/stale/force，默认none", "default": "none"},
-                "max_refresh": {"type": "integer", "description": "本次最多刷新多少只；refresh=none时默认0，其他刷新策略默认200，最大200"},
-                "days": {"type": "integer", "description": "刷新时拉取的日K天数，默认250", "default": 250},
+                "universe_limit": {"type": "integer", "description": "最多检查多少只候选；测试或试跑时可设置，正式筛选通常不填"},
+                "refresh": {"type": "string", "description": "行情更新策略：none/missing/stale/force，默认none", "default": "none"},
+                "max_refresh": {"type": "integer", "description": "本次最多更新多少只；refresh=none时默认0，其他策略默认200，最大200"},
+                "days": {"type": "integer", "description": "需要的日K天数，默认250", "default": 250},
                 "include_realtime": {"type": "boolean", "description": "是否对返回页补实时行情，默认false", "default": False},
                 "realtime_limit": {"type": "integer", "description": "最多补实时行情的返回结果数量，默认20，最大50", "default": 20},
-                "batch_size": {"type": "integer", "description": "内部批量读取大小，默认200，最大500", "default": 200}
+                "batch_size": {"type": "integer", "description": "批量处理大小，默认200，最大500", "default": 200}
             }
         }
     },
     {
         "name": "start_market_sync",
-        "description": "【全市场后台同步】启动服务端后台任务，分批、限速、按缓存缺口同步全A股/创业板/科创板/主板数据。用于为后续 screen_market 准备完整缓存；不会一次性返回大量股票结果。同步完成后仍应先筛选，再逐只或小批次做深度分析",
+        "description": "输入股票范围、历史天数、数量上限和请求间隔；返回市场数据更新任务的 job_id、状态和进度。适合范围较大的数据更新任务；该工具不返回股票详情，完成后用 screen_market 获取候选结果",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "board": {"type": "string", "description": "同步范围：a_share=全A股，main=沪深主板，gem=创业板，star=科创板，hs_a=沪深A股，bse=北交所", "default": "a_share"},
-                "refresh": {"type": "string", "description": "同步策略：missing=只补缺失，stale=补缺失和过期，force=强制刷新，默认stale", "default": "stale"},
-                "max_codes": {"type": "integer", "description": "本任务最多扫描多少只；试跑可设置，正式同步不填"},
-                "days": {"type": "integer", "description": "目标历史窗口，默认250；已有足够历史时只按近期缺口增量拉取", "default": 250},
-                "delay": {"type": "number", "description": "每只股票刷新后的延迟秒数，默认0.2", "default": 0.2}
+                "board": {"type": "string", "description": "股票范围：a_share=全A股，main=沪深主板，gem=创业板，star=科创板，hs_a=沪深A股，bse=北交所", "default": "a_share"},
+                "refresh": {"type": "string", "description": "更新策略：missing=只补缺失，stale=补缺失和过期，force=强制重新拉取，默认stale", "default": "stale"},
+                "max_codes": {"type": "integer", "description": "本任务最多处理多少只；试跑可设置，正式任务通常不填"},
+                "days": {"type": "integer", "description": "需要的历史天数，默认250", "default": 250},
+                "delay": {"type": "number", "description": "每只股票请求后的延迟秒数，默认0.2", "default": 0.2}
             }
         }
     },
     {
         "name": "get_market_sync_status",
-        "description": "查询市场后台同步任务状态；不传 job_id 时返回最近任务列表",
+        "description": "输入 job_id 可查询指定市场数据更新任务；不传 job_id 时返回最近任务列表",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -309,7 +337,7 @@ TOOLS = [
     },
     {
         "name": "cancel_market_sync",
-        "description": "请求取消正在运行的市场后台同步任务；任务会在当前股票处理结束后停止",
+        "description": "输入 job_id；请求取消正在运行的市场数据更新任务，并返回任务状态",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -320,20 +348,20 @@ TOOLS = [
     },
     {
         "name": "update_stock",
-        "description": "按给定股票代码更新服务缓存（日K、估值、技术指标等），必要时从外部API拉取；如果缓存已是最新，则跳过更新；不会自动枚举全市场股票。若用户要求全A股/创业板/科创板/主板筛选，请调用 screen_market",
+        "description": "输入单只股票代码、历史天数和是否强制重新拉取；返回更新是否成功。适合用户已明确股票代码的个股分析；不会自动枚举全市场股票",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码，如 601138"},
                 "days": {"type": "integer", "description": "拉取天数，默认250", "default": 250},
-                "force": {"type": "boolean", "description": "强制更新，忽略缓存", "default": False}
+                "force": {"type": "boolean", "description": "强制重新拉取", "default": False}
             },
             "required": ["code"]
         }
     },
     {
         "name": "update_stocks",
-        "description": "按给定股票代码列表批量更新服务缓存，必要时从外部API拉取；不会自动枚举全市场股票，也不会反推候选列表。仅适合明确的小批量代码列表，单次最多50只；大量股票请使用 start_market_sync 分批同步，避免接口限流",
+        "description": "输入股票代码列表和历史天数；返回各股票更新结果。仅适合明确的小批量代码列表，单次最多50只；大量股票请先用 screen_market 缩小范围或用 start_market_sync 分批处理",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -345,7 +373,7 @@ TOOLS = [
     },
     {
         "name": "get_stock_info",
-        "description": "获取股票基本信息；服务会优先使用缓存，若该股票尚未更新过，可能返回空",
+        "description": "输入股票代码；返回股票名称、市场等基本信息。若返回为空，可先调用 update_stock",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -356,7 +384,7 @@ TOOLS = [
     },
     {
         "name": "get_daily_data",
-        "description": "获取指定股票的日K线数据；每次任务前必须先调用 get_current_time。若查询范围涉及当前日期，服务会在缓存基础上自动补充实时行情，避免当日数据滞后",
+        "description": "输入股票代码、开始日期、结束日期和条数限制；返回日K线列表。每次任务前必须先调用 get_current_time；若返回为空，可先调用 update_stock",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -370,7 +398,7 @@ TOOLS = [
     },
     {
         "name": "get_valuation_data",
-        "description": "获取指定股票估值数据（PE、PB等）；服务会优先使用缓存，若需分析新股票，请先调用 update_stock/update_stocks 更新缓存",
+        "description": "输入股票代码、开始日期和结束日期；返回 PE、PB 等估值数据列表。若返回为空，可先调用 update_stock",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -383,7 +411,7 @@ TOOLS = [
     },
     {
         "name": "get_technical_data",
-        "description": "获取指定股票技术指标数据（MA、位置等）；技术指标由 update_stock/update_stocks 基于已缓存日K计算",
+        "description": "输入股票代码、开始日期和结束日期；返回 MA、位置等技术指标数据列表。若返回为空，可先调用 update_stock",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -396,21 +424,21 @@ TOOLS = [
     },
     {
         "name": "get_latest_data",
-        "description": "批量获取给定股票列表的最新综合数据；每次任务前必须先调用 get_current_time。仅适合小批量候选详情读取，单次最多30只；不要一次拉取全部候选详情再分析，容易耗时、触发限流并挤占上下文。全市场/板块筛选请调用 screen_market",
+        "description": "输入股票代码列表和实时行情选项；返回每只股票的最新价格、估值、52周位置等综合数据。每次任务前必须先调用 get_current_time，单次最多30只；不要一次读取全量候选详情，先用 screen_market 缩小范围",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "codes": {"type": "array", "items": {"type": "string"}, "description": "股票代码列表"},
                 "include_realtime": {"type": "boolean", "description": "是否补实时行情；大量代码建议false", "default": False},
                 "realtime_limit": {"type": "integer", "description": "最多补实时行情的股票数量"},
-                "batch_size": {"type": "integer", "description": "内部批量读取大小，默认200，最大500", "default": 200}
+                "batch_size": {"type": "integer", "description": "批量处理大小，默认200，最大500", "default": 200}
             },
             "required": ["codes"]
         }
     },
     {
         "name": "get_realtime_price",
-        "description": "按给定股票代码实时获取当前价格和估值，直接调用外部API，不使用服务缓存；不支持自动发现股票代码",
+        "description": "输入股票代码；返回当前价格、估值、时间和行情来源等实时数据。适合按明确代码补充盘中或最新行情，不用于发现股票代码",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -421,7 +449,7 @@ TOOLS = [
     },
     {
         "name": "get_realtime_prices",
-        "description": "按给定股票代码列表批量实时获取当前价格和估值，直接调用外部API，不使用服务缓存；不支持自动发现股票代码；单次最多20只",
+        "description": "输入股票代码列表和请求间隔；返回每只股票的当前价格、估值、时间和行情来源等实时数据，单次最多20只。适合按明确代码小批量补充盘中或最新行情，不用于发现股票代码",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -433,7 +461,7 @@ TOOLS = [
     },
     {
         "name": "analyze_position",
-        "description": "基于给定股票列表的可用历史数据分析52周位置，返回低位/中位/高位分类；服务会优先使用缓存；仅适合小批量明确代码列表，单次最多100只。全市场筛选请调用 screen_market，筛选后逐只或小批次做深度分析",
+        "description": "输入股票代码列表；返回52周位置分析结果，并按低位、中位、中高位、高位分类。单次最多100只；全市场筛选请先用 screen_market",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -444,7 +472,7 @@ TOOLS = [
     },
     {
         "name": "check_missing_data",
-        "description": "检查给定股票列表在服务缓存中的日K数据是否缺失，可用于判断是否需要先 update_stock/update_stocks；单次最多200只",
+        "description": "输入股票代码列表、开始日期和结束日期；返回指定日期范围内缺失日K数据的股票列表。单次最多200只；适合在小批量代码分析前检查数据是否完整",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -457,21 +485,21 @@ TOOLS = [
     },
     {
         "name": "update_minute_data",
-        "description": "按给定股票代码更新服务的分钟K线缓存，必要时从外部API拉取。如果缓存已是最新（5分钟内），则跳过更新；不会自动枚举全市场股票",
+        "description": "输入股票代码、K线类型、天数和是否强制重新拉取；返回分钟K线更新是否成功。适合用户已明确股票代码的日内分析；不会自动枚举全市场股票",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码，如 603993"},
                 "klt": {"type": "integer", "description": "K线类型：1=1分钟，5=5分钟，15=15分钟，30=30分钟，60=60分钟", "default": 5},
                 "days": {"type": "integer", "description": "拉取天数，默认5", "default": 5},
-                "force": {"type": "boolean", "description": "强制更新，忽略缓存", "default": False}
+                "force": {"type": "boolean", "description": "强制重新拉取", "default": False}
             },
             "required": ["code"]
         }
     },
     {
         "name": "get_minute_data",
-        "description": "获取指定股票分钟K线数据；服务会优先使用缓存，若需分析新股票，请先调用 update_minute_data 更新缓存",
+        "description": "输入股票代码、K线类型、开始时间、结束时间和条数限制；返回分钟K线列表。若返回为空，可先调用 update_minute_data",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -486,7 +514,7 @@ TOOLS = [
     },
     {
         "name": "analyze_intraday",
-        "description": "基于指定股票的可用日K、技术指标和分钟K线分析日内走势；服务会优先使用缓存，若数据为空，请先 update_stock 和 update_minute_data",
+        "description": "输入股票代码和分析日期；返回日内走势分析结果，包括日K、技术指标和分钟K线相关结论。若数据为空，可先调用 update_stock 和 update_minute_data",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -498,7 +526,7 @@ TOOLS = [
     }
 ]
 
-def handle_tool_call(name, arguments):
+def _handle_tool_call(name, arguments):
     try:
         if name == "get_current_time":
             return {
@@ -654,6 +682,9 @@ def handle_tool_call(name, arguments):
     
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+def handle_tool_call(name, arguments):
+    return _sanitize_for_agent(_handle_tool_call(name, arguments))
 
 async def handle_request(request):
     method = request.get("method")

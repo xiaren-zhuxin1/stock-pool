@@ -5,6 +5,7 @@ import time
 import sqlite3
 import tempfile
 import shutil
+import json
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -145,6 +146,33 @@ class TestAPIProvider(unittest.TestCase):
 
 
 class TestMCPToolBoundaries(unittest.TestCase):
+
+    def test_mcp_public_contract_hides_storage_internals(self):
+        contract = json.dumps(mcp_server.TOOLS, ensure_ascii=False).lower()
+
+        for forbidden in ('缓存', '数据库', 'cache', 'database', 'db', '内部', '快照', '已准备', '服务端'):
+            self.assertNotIn(forbidden, contract)
+
+        raw_result = {
+            'success': True,
+            'data': [{
+                'code': '600000',
+                'cache_used': False,
+                'effective_price_source': 'cache',
+            }],
+            'skipped': {
+                'no_cached_snapshot': 2,
+            }
+        }
+        public_result = mcp_server._sanitize_for_agent(raw_result)
+        public_text = json.dumps(public_result, ensure_ascii=False).lower()
+
+        self.assertNotIn('cache', public_text)
+        self.assertNotIn('缓存', public_text)
+        self.assertNotIn('uses_prepared_data', public_text)
+        self.assertEqual(public_result['data'][0]['effective_price_source'], 'historical_close')
+        self.assertEqual(public_result['skipped']['missing_data'], 2)
+        print("  MCP对外契约未暴露存储实现细节")
 
     def test_mcp_does_not_expose_cache_stats_as_analysis_source(self):
         tool_names = [tool['name'] for tool in mcp_server.TOOLS]

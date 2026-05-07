@@ -1,17 +1,17 @@
 # 股票数据池
 
-股票数据缓存和分析服务，支持MCP协议。
+股票数据获取和分析服务，支持MCP协议。
 
 ## 功能
 
-- 使用内部缓存减少重复API调用
+- 自动减少重复API调用
 - 覆盖基本信息、日K线、估值、财务、资金流向、技术指标、分钟K线等数据能力
 - 自动检查数据完整性，只拉取缺失数据
-- 实时行情工具直接调用外部API，不使用服务缓存
+- 实时行情工具直接调用外部API
 - 提供当前时间工具，便于AI Agent确定数据分析截止日期与A股交易时段
-- 当日/最新数据查询会在内部缓存基础上自动补充实时行情，降低盘中或收盘后当日数据滞后风险
-- 提供 `screen_market` 在服务端执行全A股、创业板、科创板、主板筛选，支持条件过滤、分页、受控刷新和少量实时补价
-- 提供 `start_market_sync` 后台同步任务，分批、限速、按缓存缺口维护全市场数据
+- 当日/最新数据查询会在已有日K基础上自动补充实时行情，降低盘中或收盘后当日数据滞后风险
+- 提供 `screen_market` 进行全A股、创业板、科创板、主板筛选，支持条件过滤、分页和少量实时补价
+- 提供 `start_market_sync` 市场数据更新任务，分批、限速处理全市场数据
 - 提供 `get_stock_universe` 从外部行情接口获取候选股票列表，供小范围候选分析使用
 - 支持52周滚动位置分析、估值分析
 - 支持常用技术指标：MA、EMA、MACD、RSI、KDJ、BOLL、ATR、OBV
@@ -58,7 +58,7 @@ Agent 只应通过 MCP 工具获取和分析股票数据。全A股、创业板�
 
 详细个股分析建议采用“先筛选、后逐只分析”的节奏：先用 `screen_market` 缩小候选，再对候选股票逐只或小批次调用详情工具并完成分析后再进入下一只。不要一次性拉取全量候选的全部详情再统一分析，这会显著增加耗时、触发外部接口限流/风控，并挤占上下文导致关键信息丢失。
 
-小批量工具有单次上限：`get_latest_data` 最多 30 只，`get_realtime_prices` 最多 20 只，`update_stocks` 最多 50 只，`analyze_position` 最多 100 只，`check_missing_data` 最多 200 只。超过这些规模时应使用 `screen_market` 缩小候选，或使用 `start_market_sync` 做后台维护。
+小批量工具有单次上限：`get_latest_data` 最多 30 只，`get_realtime_prices` 最多 20 只，`update_stocks` 最多 50 只，`analyze_position` 最多 100 只，`check_missing_data` 最多 200 只。超过这些规模时应使用 `screen_market` 缩小候选，或使用 `start_market_sync` 分批处理。
 
 ## 使用方式
 
@@ -72,7 +72,7 @@ pool = StockDataPool()
 # 更新数据
 pool.update_stocks(['601138', '600487'], days=250)
 
-# 获取最新数据（服务优先使用缓存）
+# 获取最新数据
 data = pool.get_latest_data(['601138', '600487'])
 
 # 分析位置
@@ -94,15 +94,15 @@ result = pool.screen_market({
 })
 ```
 
-`screen_market` 必须提供至少一个筛选条件。默认只使用服务缓存快照，避免全量实时请求；需要刷新数据时使用 `refresh='missing'` 或 `refresh='stale'`。已有足够历史数据时，刷新会按最近缺口增量拉取；选择刷新策略后默认最多刷新 200 只，也可用 `max_refresh` 收紧本次刷新数量。
+`screen_market` 必须提供至少一个筛选条件。默认不进行全量实时请求；需要更新数据时使用 `refresh='missing'` 或 `refresh='stale'`。选择更新策略后默认最多处理 200 只，也可用 `max_refresh` 收紧本次处理数量。
 
 面向全市场的推荐流程：
 
 ```python
-# 1. 后台维护缓存，可重复执行；已有足够历史时只补近期缺口
+# 1. 分批更新市场数据
 sync = pool.sync_market(board='a_share', refresh='stale', days=250, delay=0.2)
 
-# 2. 用户筛选时直接读快照，避免临时全量刷新
+# 2. 用户筛选时按条件返回结果
 result = pool.screen_market({
     'board': 'a_share',
     'position_max': 30,
@@ -135,14 +135,14 @@ python mcp_server.py
 
 #### 能力边界
 
-- `screen_market`：服务端受控执行全A股、创业板、科创板、主板筛选；默认不拉实时行情，支持筛选条件、分页返回、受控刷新。
+- `screen_market`：输入市场范围、筛选条件、排序和分页参数；返回符合条件的股票列表和数量信息。
 - `screen_main_board`：兼容入口，等价于 `screen_market(board="main")`。
-- `start_market_sync` / `get_market_sync_status` / `cancel_market_sync`：后台维护全市场/板块缓存，用于为后续筛选准备完整快照。
-- 同步任务状态可通过 `get_market_sync_status` 查询；服务重启后未完成任务会标记为 `interrupted`，可重新启动同步继续补齐。
+- `start_market_sync` / `get_market_sync_status` / `cancel_market_sync`：输入市场范围和任务参数；返回任务 ID、状态和进度。
+- 任务状态可通过 `get_market_sync_status` 查询；服务重启后未完成任务会标记为 `interrupted`，可重新启动任务继续处理。
 - `get_stock_universe`：从外部行情接口获取候选股票代码列表，适用于小范围候选分析，不作为全市场/板块筛选的主入口。
-- `update_stock` / `update_stocks` / `update_minute_data`：按用户或 Agent 提供的股票代码更新服务缓存，必要时从外部 API 拉取数据。
-- `get_daily_data` / `get_valuation_data` / `get_technical_data` / `get_latest_data` / `analyze_position` / `analyze_intraday`：面向调用方表现为获取/分析股票数据；服务内部会优先使用缓存，避免重复 API 调用。
-- `get_realtime_price` / `get_realtime_prices`：按给定股票代码直连外部 API 获取实时行情，不使用服务缓存，但也不负责发现股票代码。
+- `update_stock` / `update_stocks` / `update_minute_data`：输入股票代码和时间范围参数；返回更新结果。
+- `get_daily_data` / `get_valuation_data` / `get_technical_data` / `get_latest_data` / `analyze_position` / `analyze_intraday`：面向调用方表现为获取/分析股票数据。
+- `get_realtime_price` / `get_realtime_prices`：按给定股票代码直连外部 API 获取实时行情，但不负责发现股票代码。
 - 全市场/板块筛选必须走 `screen_market`。其他工具只处理用户或 Agent 已明确给出的股票代码列表。
 
 #### MCP工具列表
@@ -163,32 +163,32 @@ python mcp_server.py
 
 - `realtime_used`：是否成功使用实时行情
 - `realtime_price`：实时价格
-- `effective_close`：分析推荐优先使用的有效价格（实时价优先，否则缓存收盘价）
-- `effective_price_source`：`realtime` 或 `cache`
+- `effective_close`：分析推荐优先使用的有效价格（实时价优先，否则最近收盘价）
+- `effective_price_source`：`realtime` 或 `historical_close`
 - `time_context`：本次数据对应的当前时间与交易时段上下文
 
 | 工具 | 说明 |
 |------|------|
 | get_current_time | 强制前置工具；获取当前北京时间、交易日/交易时段状态，用于确定分析截止日期 |
-| screen_market | 服务端执行全A股、创业板、科创板、主板筛选；支持条件过滤、分页、受控刷新，默认不拉实时行情 |
+| screen_market | 输入范围、筛选条件、排序和分页参数；返回股票列表和数量信息 |
 | screen_main_board | 主板筛选兼容入口 |
-| start_market_sync | 启动后台市场同步任务，分批、限速、按缓存缺口补齐数据 |
-| get_market_sync_status | 查询后台市场同步任务状态 |
-| cancel_market_sync | 请求取消正在运行的后台市场同步任务 |
+| start_market_sync | 启动市场数据更新任务，返回任务 ID 和进度 |
+| get_market_sync_status | 查询市场数据更新任务状态 |
+| cancel_market_sync | 请求取消正在运行的市场数据更新任务 |
 | get_stock_universe | 从外部行情接口获取候选股票列表，供小范围候选分析使用 |
-| update_stock | 按给定代码更新单只股票服务缓存，不自动枚举全市场 |
-| update_stocks | 按给定代码列表批量更新股票服务缓存，不自动枚举全市场 |
-| get_stock_info | 获取股票基本信息，服务优先使用缓存 |
-| get_daily_data | 获取日K线；若查询范围涉及今天，会在缓存基础上自动补充实时行情 |
-| get_valuation_data | 获取估值数据，服务优先使用缓存 |
-| get_technical_data | 获取技术指标，服务优先使用缓存 |
+| update_stock | 按给定代码更新单只股票数据，不自动枚举全市场 |
+| update_stocks | 按给定代码列表批量更新股票数据，不自动枚举全市场 |
+| get_stock_info | 获取股票基本信息 |
+| get_daily_data | 获取日K线；若查询范围涉及今天，会在已有日K基础上自动补充实时行情 |
+| get_valuation_data | 获取估值数据 |
+| get_technical_data | 获取技术指标 |
 | get_latest_data | 批量获取给定代码列表的最新数据；仅适合小批量候选详情读取，大量代码建议关闭实时补价 |
-| get_realtime_price | 实时获取单只股票当前价格，直连外部API，不使用服务缓存 |
-| get_realtime_prices | 批量实时获取股票当前价格，直连外部API，不使用服务缓存 |
+| get_realtime_price | 实时获取单只股票当前价格，直连外部API |
+| get_realtime_prices | 批量实时获取股票当前价格，直连外部API |
 | analyze_position | 基于给定代码列表的可用历史数据分析52周位置，不是全市场筛选器 |
-| check_missing_data | 检查给定代码列表在服务缓存中的缺失数据 |
-| update_minute_data | 按给定代码更新分钟K线缓存 |
-| get_minute_data | 获取分钟K线，服务优先使用缓存 |
+| check_missing_data | 检查给定代码列表在指定日期范围内的缺失数据 |
+| update_minute_data | 按给定代码更新分钟K线数据 |
+| get_minute_data | 获取分钟K线 |
 | analyze_intraday | 基于可用日K、技术指标和分钟K线做日内走势分析 |
 
 ## 分析逻辑
