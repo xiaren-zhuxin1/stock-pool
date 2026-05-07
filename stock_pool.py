@@ -235,6 +235,36 @@ class StockDataPool:
             return realtime
         return None
     
+    def get_realtime_price(self, code):
+        """直接从外部行情 API 获取实时价格，不读取或写入 SQLite 缓存。"""
+        realtime, api_name = self.api.fetch_realtime(code)
+        if not realtime:
+            return {
+                'success': False,
+                'code': code,
+                'cache_used': False,
+                'message': '实时行情 API 未返回数据'
+            }
+        
+        realtime = dict(realtime)
+        realtime.update({
+            'success': True,
+            'code': code,
+            'api_name': api_name,
+            'cache_used': False,
+            'fetched_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        })
+        return realtime
+    
+    def get_realtime_prices(self, codes, delay=0.2):
+        """批量直接从外部行情 API 获取实时价格，不读取或写入 SQLite 缓存。"""
+        results = []
+        for code in codes:
+            results.append(self.get_realtime_price(code))
+            if delay:
+                time.sleep(delay)
+        return results
+    
     def fetch_fund_flow(self, code):
         return None
     

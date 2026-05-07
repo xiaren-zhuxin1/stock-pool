@@ -248,6 +248,39 @@ class TestStockDataPool(unittest.TestCase):
         print(f"  收盘价: {data[0]['close']}")
         print(f"  位置: {data[0]['position_pct']:.1f}%")
     
+    def test_realtime_price_bypasses_database_cache(self):
+        print("\n[测试] 实时价格直连API且不使用数据库缓存")
+        pool = StockDataPool(':memory:')
+        calls = []
+
+        class FakeAPI:
+            def fetch_realtime(self, code):
+                calls.append(code)
+                return {
+                    'name': '测试股票',
+                    'price': 12.34,
+                    'pe_ttm': 10.5,
+                    'pb': 1.2,
+                    'data_source': 'fake',
+                    'data_quality': 'full',
+                    'missing_fields': []
+                }, 'fake'
+
+        pool.api = FakeAPI()
+        data = pool.get_realtime_price('000001')
+
+        self.assertEqual(calls, ['000001'])
+        self.assertTrue(data['success'])
+        self.assertFalse(data['cache_used'])
+        self.assertEqual(data['price'], 12.34)
+        self.assertEqual(data['api_name'], 'fake')
+        self.assertEqual(pool.get_db_stats()['stock_count'], 0)
+
+        batch = pool.get_realtime_prices(['000001', '000002'], delay=0)
+        self.assertEqual([item['code'] for item in batch], ['000001', '000002'])
+        self.assertEqual(pool.get_db_stats()['stock_count'], 0)
+        print("  实时价格未读取/写入数据库缓存")
+    
     def test_technical_calculation(self):
         print("\n[测试] 技术指标计算")
         code = '601138'

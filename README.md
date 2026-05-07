@@ -7,6 +7,7 @@
 - 本地SQLite数据库存储股票数据
 - 多表设计：基本信息、日K线、估值、财务、资金流向、技术指标、分钟K线
 - 自动检查数据完整性，只拉取缺失数据
+- 实时行情工具直接调用外部API，不使用数据库缓存
 - 支持52周滚动位置分析、估值分析
 - 支持常用技术指标：MA、EMA、MACD、RSI、KDJ、BOLL、ATR、OBV
 - 提供MCP服务器，支持AI模型直接调用
@@ -152,6 +153,8 @@ python mcp_server.py
 | get_valuation_data | 获取估值数据 |
 | get_technical_data | 获取技术指标 |
 | get_latest_data | 获取最新数据 |
+| get_realtime_price | 实时获取单只股票当前价格，直连外部API，不使用数据库缓存 |
+| get_realtime_prices | 批量实时获取股票当前价格，直连外部API，不使用数据库缓存 |
 | analyze_position | 分析52周位置 |
 | check_missing_data | 检查缺失数据 |
 | get_db_stats | 获取数据库统计 |

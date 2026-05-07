@@ -100,6 +100,29 @@ TOOLS = [
         }
     },
     {
+        "name": "get_realtime_price",
+        "description": "实时获取单只股票当前价格和估值，直接调用外部API，不使用数据库缓存",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "股票代码，如 601138"}
+            },
+            "required": ["code"]
+        }
+    },
+    {
+        "name": "get_realtime_prices",
+        "description": "批量实时获取股票当前价格和估值，直接调用外部API，不使用数据库缓存",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "codes": {"type": "array", "items": {"type": "string"}, "description": "股票代码列表"},
+                "delay": {"type": "number", "description": "每只股票请求间隔秒数，默认0.2", "default": 0.2}
+            },
+            "required": ["codes"]
+        }
+    },
+    {
         "name": "analyze_position",
         "description": "分析股票52周位置，返回低位/中位/高位分类",
         "inputSchema": {
@@ -221,6 +244,17 @@ def handle_tool_call(name, arguments):
             data = pool.get_latest_data(codes)
             return {"success": True, "data": data}
         
+        elif name == "get_realtime_price":
+            code = arguments.get("code")
+            data = pool.get_realtime_price(code)
+            return {"success": True, "data": data}
+        
+        elif name == "get_realtime_prices":
+            codes = arguments.get("codes", [])
+            delay = arguments.get("delay", 0.2)
+            data = pool.get_realtime_prices(codes, delay=delay)
+            return {"success": True, "data": data}
+        
         elif name == "analyze_position":
             codes = arguments.get("codes", [])
             data = pool.analyze_position(codes)
@@ -268,11 +302,19 @@ def handle_tool_call(name, arguments):
 
 async def handle_request(request):
     method = request.get("method")
+    request_id = request.get("id")
+    is_notification = "id" not in request
+    
+    # JSON-RPC notifications (for example MCP's "notifications/initialized")
+    # must not receive a response. Returning an error with id=null makes Cline's
+    # MCP client reject the message during connection validation.
+    if is_notification:
+        return None
     
     if method == "initialize":
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id"),
+            "id": request_id,
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {
@@ -288,7 +330,7 @@ async def handle_request(request):
     elif method == "tools/list":
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id"),
+            "id": request_id,
             "result": {
                 "tools": TOOLS
             }
@@ -301,7 +343,7 @@ async def handle_request(request):
         result = handle_tool_call(name, arguments)
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id"),
+            "id": request_id,
             "result": {
                 "content": [
                     {
@@ -315,7 +357,7 @@ async def handle_request(request):
     else:
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id"),
+            "id": request_id,
             "error": {
                 "code": -32601,
                 "message": f"Method not found: {method}"
@@ -324,27 +366,36 @@ async def handle_request(request):
 
 async def main():
     while True:
+        request_id = None
         try:
             line = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
             if not line:
                 break
             
             request = json.loads(line.strip())
+            request_id = request.get("id") if isinstance(request, dict) else None
             response = await handle_request(request)
-            print(json.dumps(response), flush=True)
+            if response is not None:
+                print(json.dumps(response), flush=True)
         
         except json.JSONDecodeError:
             continue
         except Exception as e:
-            error_response = {
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {
-                    "code": -32603,
-                    "message": str(e)
+            # Only send JSON-RPC errors when we have a valid request id.
+            # Cline rejects server messages with id=null, so notification/parse
+            # errors are logged to stderr instead of stdout.
+            if request_id is not None:
+                error_response = {
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": {
+                        "code": -32603,
+                        "message": str(e)
+                    }
                 }
-            }
-            print(json.dumps(error_response), flush=True)
+                print(json.dumps(error_response), flush=True)
+            else:
+                print(f"MCP server error: {e}", file=sys.stderr, flush=True)
 
 if __name__ == "__main__":
     asyncio.run(main())
