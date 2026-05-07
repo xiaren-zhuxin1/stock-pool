@@ -216,6 +216,158 @@ class StockAPIProvider:
                 continue
         
         return None, None
+
+    def fetch_stock_universe_eastmoney(self, board='main', limit=None, page_size=100):
+        """从东方财富列表接口获取候选股票池，不使用本地缓存数据库。"""
+        board_fs = {
+            'a_share': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048',
+            'all_a': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048',
+            'all': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048',
+            '全A': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048',
+            '全A股': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048',
+            '全市场': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048',
+            'hs_a': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80',
+            '沪深A股': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80',
+            'main': 'm:1+t:2,m:0+t:6',
+            'main_board': 'm:1+t:2,m:0+t:6',
+            '主板': 'm:1+t:2,m:0+t:6',
+            'sh_main': 'm:1+t:2',
+            '沪主板': 'm:1+t:2',
+            'sz_main': 'm:0+t:6',
+            '深主板': 'm:0+t:6',
+            'gem': 'm:0+t:80',
+            'chinext': 'm:0+t:80',
+            '创业板': 'm:0+t:80',
+            'star': 'm:1+t:23',
+            'star_market': 'm:1+t:23',
+            '科创板': 'm:1+t:23',
+            'bse': 'm:0+t:81+s:2048',
+            '北交所': 'm:0+t:81+s:2048',
+        }
+        fs = board_fs.get(board)
+        if not fs:
+            raise ValueError(f"不支持的股票池: {board}")
+
+        try:
+            page_size = max(1, min(int(page_size), 100))
+        except (TypeError, ValueError):
+            page_size = 100
+
+        if limit is not None:
+            try:
+                limit = max(0, int(limit))
+            except (TypeError, ValueError):
+                limit = None
+            if limit == 0:
+                return {
+                    'board': board,
+                    'source': 'eastmoney',
+                    'total': None,
+                    'returned': 0,
+                    'stocks': [],
+                    'codes': [],
+                }
+
+        url = "http://80.push2.eastmoney.com/api/qt/clist/get"
+        results = []
+        total = None
+        page = 1
+
+        try:
+            while True:
+                params = {
+                    'pn': str(page),
+                    'pz': str(page_size),
+                    'po': '1',
+                    'np': '1',
+                    'fltt': '2',
+                    'invt': '2',
+                    'fid': 'f3',
+                    'fs': fs,
+                    'fields': 'f12,f13,f14,f20,f21,f100',
+                }
+                headers = self._get_headers('http://quote.eastmoney.com/')
+                headers['Accept-Encoding'] = 'gzip, deflate'
+                response = self._request_with_retry(
+                    url,
+                    params=params,
+                    headers=headers,
+                    timeout=20
+                )
+                if not response:
+                    break
+
+                data = response.json()
+                payload = data.get('data') if isinstance(data, dict) else None
+                if not payload:
+                    break
+
+                total = payload.get('total', total)
+                rows = payload.get('diff') or []
+                if not rows:
+                    break
+
+                for row in rows:
+                    code = row.get('f12')
+                    if not code:
+                        continue
+                    market_id = row.get('f13')
+                    if code.startswith(('4', '8', '9')):
+                        market = 'BJ'
+                    elif market_id == 1:
+                        market = 'SH'
+                    elif market_id == 0:
+                        market = 'SZ'
+                    else:
+                        market = str(market_id)
+                    results.append({
+                        'code': code,
+                        'name': row.get('f14') or '',
+                        'market': market,
+                        'board': board,
+                        'industry': row.get('f100') or '',
+                        'market_cap': row.get('f20'),
+                        'circ_market_cap': row.get('f21'),
+                    })
+                    if limit is not None and len(results) >= limit:
+                        self._mark_api_success('eastmoney')
+                        return {
+                            'board': board,
+                            'source': 'eastmoney',
+                            'total': total,
+                            'returned': len(results),
+                            'stocks': results,
+                            'codes': [item['code'] for item in results],
+                        }
+
+                if total is not None and page * page_size >= total:
+                    break
+                page += 1
+                time.sleep(random.uniform(0.05, 0.15))
+
+            self._mark_api_success('eastmoney')
+            return {
+                'board': board,
+                'source': 'eastmoney',
+                'total': total,
+                'returned': len(results),
+                'stocks': results,
+                'codes': [item['code'] for item in results],
+            }
+        except Exception as e:
+            self._mark_api_error('eastmoney', e)
+            return {
+                'board': board,
+                'source': 'eastmoney',
+                'total': total,
+                'returned': len(results),
+                'stocks': results,
+                'codes': [item['code'] for item in results],
+                'error': str(e),
+            }
+
+    def fetch_stock_universe(self, board='main', limit=None, page_size=100):
+        return self.fetch_stock_universe_eastmoney(board, limit=limit, page_size=page_size)
     
     def fetch_realtime_eastmoney(self, code):
         try:

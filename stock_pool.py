@@ -256,6 +256,20 @@ class StockDataPool:
                 UNIQUE(code, data_time, klt)
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS service_sync_jobs (
+                job_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                args_json TEXT,
+                progress_json TEXT,
+                result_json TEXT,
+                error TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                finished_at TEXT
+            )
+        ''')
         
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_code_date ON stock_daily(code, data_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_date ON stock_daily(data_date)')
@@ -264,12 +278,148 @@ class StockDataPool:
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_technical_code_date ON stock_technical(code, data_date)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_code_time ON stock_minute(code, data_time)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_time ON stock_minute(data_time)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_jobs_updated ON service_sync_jobs(updated_at)')
         self._ensure_column(cursor, 'stock_technical', 'atr', 'REAL')
         self._ensure_column(cursor, 'stock_technical', 'obv', 'REAL')
         
         conn.commit()
         conn.close()
-        print(f"数据库初始化完成: {self.db_path}")
+        print("服务缓存初始化完成")
+
+    @staticmethod
+    def _json_dumps(value):
+        import json
+        return json.dumps(value if value is not None else {}, ensure_ascii=False, default=str)
+
+    @staticmethod
+    def _json_loads(value, default=None):
+        import json
+        if not value:
+            return {} if default is None else default
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError):
+            return {} if default is None else default
+
+    @staticmethod
+    def _sync_job_from_row(row):
+        if not row:
+            return None
+        return {
+            'job_id': row[0],
+            'status': row[1],
+            'args': StockDataPool._json_loads(row[2]),
+            'progress': StockDataPool._json_loads(row[3]),
+            'result': StockDataPool._json_loads(row[4], None) if row[4] else None,
+            'error': row[5],
+            'created_at': row[6],
+            'updated_at': row[7],
+            'finished_at': row[8],
+        }
+
+    def save_sync_job(self, job):
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO service_sync_jobs
+                (job_id, status, args_json, progress_json, result_json, error, created_at, updated_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                job.get('job_id'),
+                job.get('status'),
+                self._json_dumps(job.get('args')),
+                self._json_dumps(job.get('progress')),
+                self._json_dumps(job.get('result')) if job.get('result') is not None else None,
+                job.get('error'),
+                job.get('created_at'),
+                job.get('updated_at'),
+                job.get('finished_at'),
+            ))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def update_sync_job(self, job_id, **fields):
+        if not fields:
+            return
+        allowed = {
+            'status': 'status',
+            'args': 'args_json',
+            'progress': 'progress_json',
+            'result': 'result_json',
+            'error': 'error',
+            'created_at': 'created_at',
+            'updated_at': 'updated_at',
+            'finished_at': 'finished_at',
+        }
+        sets = []
+        params = []
+        for key, value in fields.items():
+            column = allowed.get(key)
+            if not column:
+                continue
+            sets.append(f'{column} = ?')
+            if key in ('args', 'progress', 'result'):
+                params.append(self._json_dumps(value) if value is not None else None)
+            else:
+                params.append(value)
+        if not sets:
+            return
+        params.append(job_id)
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(f'''
+                UPDATE service_sync_jobs
+                SET {', '.join(sets)}
+                WHERE job_id = ?
+            ''', params)
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_sync_job(self, job_id):
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT job_id, status, args_json, progress_json, result_json, error, created_at, updated_at, finished_at
+                FROM service_sync_jobs
+                WHERE job_id = ?
+            ''', (job_id,))
+            return self._sync_job_from_row(cursor.fetchone())
+        finally:
+            conn.close()
+
+    def list_sync_jobs(self, limit=20):
+        limit = self._normalize_positive_int(limit, 20, 100)
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT job_id, status, args_json, progress_json, result_json, error, created_at, updated_at, finished_at
+                FROM service_sync_jobs
+                ORDER BY updated_at DESC
+                LIMIT ?
+            ''', (limit,))
+            return [self._sync_job_from_row(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def mark_running_sync_jobs_interrupted(self, timestamp=None):
+        timestamp = timestamp or self.get_current_time_info()['datetime']
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE service_sync_jobs
+                SET status = ?, error = ?, updated_at = ?, finished_at = ?
+                WHERE status IN (?, ?)
+            ''', ('interrupted', '服务重启，后台同步任务已中断', timestamp, timestamp, 'running', 'cancelling'))
+            conn.commit()
+        finally:
+            conn.close()
     
     @staticmethod
     def _ensure_column(cursor, table, column, column_type):
@@ -548,16 +698,20 @@ class StockDataPool:
         
         if data_type == 'daily':
             cursor.execute('''
-                SELECT MAX(data_date) FROM stock_daily WHERE code = ?
+                SELECT MIN(data_date), MAX(data_date), COUNT(*) FROM stock_daily WHERE code = ?
             ''', (code,))
             result = cursor.fetchone()
-            if result and result[0]:
-                latest_date = result[0]
+            if result and result[1]:
+                earliest_date = result[0]
+                latest_date = result[1]
+                row_count = result[2]
                 today = datetime.now().strftime('%Y-%m-%d')
                 conn.close()
                 return {
                     'has_data': True,
+                    'earliest_date': earliest_date,
                     'latest_date': latest_date,
+                    'row_count': row_count,
                     'is_today': latest_date == today
                 }
         
@@ -578,22 +732,55 @@ class StockDataPool:
         
         conn.close()
         return {'has_data': False}
+
+    @staticmethod
+    def _calculate_daily_fetch_days(freshness, requested_days=250, force=False, today=None):
+        try:
+            requested_days = int(requested_days)
+        except (TypeError, ValueError):
+            requested_days = 250
+        requested_days = max(1, requested_days)
+
+        if force or not freshness.get('has_data'):
+            return requested_days
+
+        row_count = freshness.get('row_count') or 0
+        if row_count < requested_days:
+            return requested_days
+
+        if freshness.get('is_today'):
+            return 0
+
+        today = today or datetime.now().strftime('%Y-%m-%d')
+        try:
+            latest = datetime.strptime(freshness['latest_date'], '%Y-%m-%d').date()
+            current = datetime.strptime(today, '%Y-%m-%d').date()
+        except (KeyError, TypeError, ValueError):
+            return min(requested_days, 30)
+
+        gap_days = (current - latest).days
+        if gap_days <= 0:
+            return 0
+
+        return min(requested_days, max(5, gap_days * 2 + 5))
     
     def update_stock(self, code, days=250, delay=1.5, force=False):
         print(f"更新 {code}...")
-        
-        if not force:
-            freshness = self.check_data_freshness(code, 'daily')
-            if freshness['has_data'] and freshness['is_today']:
-                print(f"  数据已是最新（{freshness['latest_date']}），跳过更新")
-                return
+
+        freshness = self.check_data_freshness(code, 'daily')
+        fetch_days = self._calculate_daily_fetch_days(freshness, days, force)
+        if fetch_days == 0:
+            print(f"  数据已是最新（{freshness['latest_date']}），跳过更新")
+            return
         
         info = self.fetch_stock_info(code)
         if info:
             self.save_stock_info(code, info)
             print(f"  名称: {info.get('name', '')}")
         
-        klines = self.fetch_kline_data(code, days)
+        if freshness.get('has_data') and fetch_days < days:
+            print(f"  使用增量刷新：缓存最新至 {freshness.get('latest_date')}，本次拉取最近 {fetch_days} 天")
+        klines = self.fetch_kline_data(code, fetch_days)
         if klines:
             count = self.save_daily_data(code, klines)
             print(f"  日K线: {count} 条")
@@ -802,64 +989,342 @@ class StockDataPool:
             'position_pct': r['position_pct'],
         } for r in rows]
     
-    def get_latest_data(self, codes):
+    @staticmethod
+    def _chunked(items, size):
+        size = max(1, int(size or 1))
+        for i in range(0, len(items), size):
+            yield items[i:i + size]
+
+    @staticmethod
+    def _unique_codes(codes):
+        seen = set()
+        result = []
+        for code in codes or []:
+            code = str(code).strip()
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            result.append(code)
+        return result
+
+    def get_latest_data(self, codes, include_realtime=True, realtime_limit=None, batch_size=200):
+        codes = self._unique_codes(codes)
+        if not codes:
+            return []
+
+        try:
+            batch_size = max(1, min(int(batch_size), 500))
+        except (TypeError, ValueError):
+            batch_size = 200
+
+        if realtime_limit is not None:
+            try:
+                realtime_limit = max(0, int(realtime_limit))
+            except (TypeError, ValueError):
+                realtime_limit = None
+
         conn = self._connect()
         cursor = conn.cursor()
         
         import json
         results = []
-        for code in codes:
+        for chunk in self._chunked(codes, batch_size):
+            placeholders = ','.join('?' for _ in chunk)
             cursor.execute('''
+                WITH latest_daily AS (
+                    SELECT d.*
+                    FROM stock_daily d
+                    JOIN (
+                        SELECT code, MAX(data_date) AS data_date
+                        FROM stock_daily
+                        WHERE code IN ({placeholders})
+                        GROUP BY code
+                    ) latest
+                      ON d.code = latest.code AND d.data_date = latest.data_date
+                ),
+                latest_valuation AS (
+                    SELECT v.*
+                    FROM stock_valuation v
+                    JOIN (
+                        SELECT code, MAX(data_date) AS data_date
+                        FROM stock_valuation
+                        WHERE code IN ({placeholders})
+                        GROUP BY code
+                    ) latest
+                      ON v.code = latest.code AND v.data_date = latest.data_date
+                )
                 SELECT 
                     i.code, i.name, i.market,
                     d.data_date, d.close,
-                    t.position_pct, t.high_52w, t.low_52w
+                    t.position_pct, t.high_52w, t.low_52w,
+                    v.pe_ttm, v.pb, v.market_cap, v.data_source, v.data_quality, v.missing_fields
                 FROM stock_info i
-                LEFT JOIN stock_daily d ON i.code = d.code
+                LEFT JOIN latest_daily d ON i.code = d.code
                 LEFT JOIN stock_technical t ON i.code = t.code AND d.data_date = t.data_date
-                WHERE i.code = ?
-                ORDER BY d.data_date DESC
-                LIMIT 1
-            ''', (code,))
-            
-            row = cursor.fetchone()
-            if row:
-                cursor.execute('''
-                    SELECT pe_ttm, pb, market_cap, data_source, data_quality, missing_fields
-                    FROM stock_valuation
-                    WHERE code = ?
-                    ORDER BY data_date DESC
-                    LIMIT 1
-                ''', (code,))
-                
-                valuation_row = cursor.fetchone()
-                
-                item = {
+                LEFT JOIN latest_valuation v ON i.code = v.code
+                WHERE i.code IN ({placeholders})
+            '''.format(placeholders=placeholders), chunk + chunk + chunk)
+
+            rows_by_code = {row[0]: row for row in cursor.fetchall()}
+            for code in chunk:
+                row = rows_by_code.get(code)
+                if not row:
+                    continue
+                results.append({
                     'code': row[0],
                     'name': row[1],
                     'market': row[2],
                     'date': row[3],
                     'close': row[4],
-                    'pe_ttm': valuation_row[0] if valuation_row else None,
-                    'pb': valuation_row[1] if valuation_row else None,
-                    'market_cap': valuation_row[2] if valuation_row else None,
-                    'data_source': valuation_row[3] if valuation_row else None,
-                    'data_quality': valuation_row[4] if valuation_row else None,
-                    'missing_fields': json.loads(valuation_row[5]) if valuation_row and valuation_row[5] else [],
                     'position_pct': row[5],
                     'high_52w': row[6],
                     'low_52w': row[7],
-                }
-
-                time_info = self.get_current_time_info()
-                realtime = self.get_realtime_price(code)
-                results.append(self._merge_realtime_snapshot(item, realtime, time_info))
+                    'pe_ttm': row[8],
+                    'pb': row[9],
+                    'market_cap': row[10],
+                    'data_source': row[11],
+                    'data_quality': row[12],
+                    'missing_fields': json.loads(row[13]) if row[13] else [],
+                })
         
         conn.close()
+
+        if include_realtime:
+            time_info = self.get_current_time_info()
+            realtime_count = 0
+            for item in results:
+                if realtime_limit is not None and realtime_count >= realtime_limit:
+                    item.update({
+                        'realtime_used': False,
+                        'realtime_skipped': True,
+                        'time_context': time_info,
+                    })
+                    continue
+                realtime = self.get_realtime_price(item['code'])
+                self._merge_realtime_snapshot(item, realtime, time_info)
+                realtime_count += 1
+
         return results
+
+    @staticmethod
+    def _passes_range(value, min_value=None, max_value=None):
+        if min_value is None and max_value is None:
+            return True
+        if value is None:
+            return False
+        if min_value is not None and value < min_value:
+            return False
+        if max_value is not None and value > max_value:
+            return False
+        return True
+
+    @staticmethod
+    def _to_number(value):
+        if value is None or value == '':
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _normalize_positive_int(value, default, maximum):
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            value = default
+        return max(0, min(value, maximum))
+
+    @staticmethod
+    def _needs_daily_refresh(freshness, refresh, today):
+        return (
+            refresh == 'force'
+            or (refresh == 'missing' and not freshness.get('has_data'))
+            or (refresh == 'stale' and (not freshness.get('has_data') or freshness.get('latest_date') != today))
+        )
+
+    def sync_market(self, board='a_share', refresh='stale', max_codes=None, days=250, delay=0.2,
+                    progress_callback=None, should_stop=None):
+        if refresh not in ('missing', 'stale', 'force'):
+            refresh = 'stale'
+
+        if max_codes is not None:
+            max_codes = self._normalize_positive_int(max_codes, 0, 100000)
+        days = self._normalize_positive_int(days, 250, 500) or 250
+        delay = self._to_number(delay)
+        if delay is None:
+            delay = 0.2
+
+        universe = self.api.fetch_stock_universe(board=board, limit=max_codes, page_size=100)
+        codes = universe.get('codes', [])
+        today = self.get_current_time_info()['date']
+        summary = {
+            'success': True,
+            'board': board,
+            'refresh': refresh,
+            'universe_total': universe.get('total'),
+            'total': len(codes),
+            'scanned': 0,
+            'refreshed': 0,
+            'skipped_fresh': 0,
+            'failed': 0,
+            'stopped': False,
+            'current_code': None,
+            'failures': [],
+        }
+
+        if progress_callback:
+            progress_callback(dict(summary))
+
+        for code in codes:
+            if should_stop and should_stop():
+                summary['stopped'] = True
+                break
+
+            summary['current_code'] = code
+            summary['scanned'] += 1
+            try:
+                freshness = self.check_data_freshness(code, 'daily')
+                if not self._needs_daily_refresh(freshness, refresh, today):
+                    summary['skipped_fresh'] += 1
+                else:
+                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
+                    summary['refreshed'] += 1
+            except Exception as e:
+                summary['failed'] += 1
+                if len(summary['failures']) < 20:
+                    summary['failures'].append({'code': code, 'error': str(e)})
+                print(f"  市场同步失败 {code}: {e}")
+
+            if progress_callback:
+                progress_callback(dict(summary))
+
+        summary['current_code'] = None
+        if progress_callback:
+            progress_callback(dict(summary))
+        return summary
+
+    def screen_market(self, criteria=None):
+        criteria = dict(criteria or {})
+        board = criteria.get('board') or criteria.get('market') or 'a_share'
+        limit = self._normalize_positive_int(criteria.get('limit'), 50, 200)
+        offset = self._normalize_positive_int(criteria.get('offset'), 0, 100000)
+        universe_limit = criteria.get('universe_limit')
+        if universe_limit is not None:
+            universe_limit = self._normalize_positive_int(universe_limit, 0, 5000)
+        batch_size = self._normalize_positive_int(criteria.get('batch_size'), 200, 500) or 200
+        include_realtime = bool(criteria.get('include_realtime', False))
+        realtime_limit = self._normalize_positive_int(criteria.get('realtime_limit'), 20, 50)
+        refresh = criteria.get('refresh', 'none')
+        if refresh not in ('none', 'missing', 'stale', 'force'):
+            refresh = 'none'
+        default_max_refresh = 200 if refresh != 'none' else 0
+        max_refresh = self._normalize_positive_int(criteria.get('max_refresh'), default_max_refresh, 200)
+        days = self._normalize_positive_int(criteria.get('days'), 250, 500) or 250
+        delay = self._to_number(criteria.get('delay'))
+        if delay is None:
+            delay = 0.2
+
+        filters = {
+            'position_min': self._to_number(criteria.get('position_min')),
+            'position_max': self._to_number(criteria.get('position_max')),
+            'pe_ttm_min': self._to_number(criteria.get('pe_ttm_min')),
+            'pe_ttm_max': self._to_number(criteria.get('pe_ttm_max')),
+            'pb_min': self._to_number(criteria.get('pb_min')),
+            'pb_max': self._to_number(criteria.get('pb_max')),
+            'market_cap_min': self._to_number(criteria.get('market_cap_min')),
+            'market_cap_max': self._to_number(criteria.get('market_cap_max')),
+        }
+        has_filter = any(value is not None for value in filters.values())
+        if not has_filter and not criteria.get('allow_no_filters', False):
+            return {
+                'success': False,
+                'error': '市场筛选必须提供至少一个筛选条件，例如 position_max、pe_ttm_max、pb_max 或 market_cap_min。',
+            }
+
+        universe = self.api.fetch_stock_universe(board=board, limit=universe_limit, page_size=100)
+        codes = universe.get('codes', [])
+
+        refreshed = {'attempted': 0, 'success': 0, 'failed': 0, 'mode': refresh}
+        if refresh != 'none' and max_refresh > 0:
+            today = self.get_current_time_info()['date']
+            for code in codes:
+                if refreshed['attempted'] >= max_refresh:
+                    break
+                freshness = self.check_data_freshness(code, 'daily')
+                if not self._needs_daily_refresh(freshness, refresh, today):
+                    continue
+                refreshed['attempted'] += 1
+                try:
+                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
+                    refreshed['success'] += 1
+                except Exception as e:
+                    print(f"  筛选刷新失败 {code}: {e}")
+                    refreshed['failed'] += 1
+
+        snapshots = self.get_latest_data(codes, include_realtime=False, batch_size=batch_size)
+        matched = []
+        skipped_no_snapshot = max(0, len(codes) - len(snapshots))
+
+        for row in snapshots:
+            if not self._passes_range(row.get('position_pct'), filters['position_min'], filters['position_max']):
+                continue
+            if not self._passes_range(row.get('pe_ttm'), filters['pe_ttm_min'], filters['pe_ttm_max']):
+                continue
+            if not self._passes_range(row.get('pb'), filters['pb_min'], filters['pb_max']):
+                continue
+            if not self._passes_range(row.get('market_cap'), filters['market_cap_min'], filters['market_cap_max']):
+                continue
+            matched.append(row)
+
+        sort_by = criteria.get('sort_by', 'position_pct')
+        allowed_sort = {'position_pct', 'pe_ttm', 'pb', 'market_cap', 'close', 'code', 'date'}
+        if sort_by not in allowed_sort:
+            sort_by = 'position_pct'
+        reverse = criteria.get('sort_order', 'asc') == 'desc'
+
+        non_null = [item for item in matched if item.get(sort_by) is not None]
+        null_items = [item for item in matched if item.get(sort_by) is None]
+        non_null.sort(key=lambda item: item.get(sort_by), reverse=reverse)
+        matched = non_null + null_items
+        page = matched[offset:offset + limit]
+
+        if include_realtime and page:
+            realtime_rows = self.get_latest_data(
+                [item['code'] for item in page],
+                include_realtime=True,
+                realtime_limit=realtime_limit,
+                batch_size=batch_size
+            )
+            by_code = {item['code']: item for item in realtime_rows}
+            page = [by_code.get(item['code'], item) for item in page]
+
+        return {
+            'success': True,
+            'board': board,
+            'criteria': {k: v for k, v in criteria.items() if v is not None},
+            'universe_total': universe.get('total'),
+            'universe_returned': len(codes),
+            'snapshot_count': len(snapshots),
+            'matched_count': len(matched),
+            'returned': len(page),
+            'offset': offset,
+            'limit': limit,
+            'refresh': refreshed,
+            'skipped': {
+                'no_cached_snapshot': skipped_no_snapshot,
+            },
+            'results': page,
+            'time_context': self.get_current_time_info(),
+        }
+
+    def screen_main_board(self, criteria=None):
+        criteria = dict(criteria or {})
+        criteria.setdefault('board', 'main')
+        return self.screen_market(criteria)
     
     def analyze_position(self, codes):
-        data = self.get_latest_data(codes)
+        data = self.get_latest_data(codes, include_realtime=False)
         
         result = {
             'low': [],
@@ -1213,7 +1678,7 @@ class StockDataPool:
 if __name__ == '__main__':
     pool = StockDataPool()
     
-    print("\n数据库统计:")
+    print("\n缓存统计:")
     stats = pool.get_db_stats()
     print(f"  股票数量: {stats['stock_count']}")
     print(f"  日K线记录: {stats['daily_count']}")
@@ -1224,4 +1689,3 @@ if __name__ == '__main__':
     print("\nAPI状态:")
     for name, status in pool.get_api_status().items():
         print(f"  {name}: {'可用' if status['available'] else '不可用'}")
-

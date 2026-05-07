@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Local caches and data
+*.db
+*.sqlite
+*.sqlite3
+
+# Local environment and editor files
+.venv/
+venv/
+.env
+.vscode/
+.idea/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from stock_pool.stock_pool import StockDataPool
 from stock_pool.api_provider import StockAPIProvider
+from stock_pool import mcp_server
 
 class TestAPIProvider(unittest.TestCase):
     
@@ -81,6 +82,181 @@ class TestAPIProvider(unittest.TestCase):
         api._mark_api_success('eastmoney')
         self.assertTrue(api.api_status['eastmoney']['available'])
         self.assertEqual(api.api_status['eastmoney']['error_count'], 0)
+
+    def test_fetch_stock_universe_uses_external_api(self):
+        print("\n[测试] 股票池列表来自外部API")
+        api = StockAPIProvider()
+        calls = []
+
+        class FakeResponse:
+            def json(self):
+                return {
+                    'data': {
+                        'total': 2,
+                        'diff': [
+                            {'f12': '600000', 'f13': 1, 'f14': '浦发银行', 'f20': 1, 'f21': 1, 'f100': '银行'},
+                            {'f12': '000001', 'f13': 0, 'f14': '平安银行', 'f20': 2, 'f21': 2, 'f100': '银行'},
+                        ]
+                    }
+                }
+
+        def fake_request(url, params=None, headers=None, timeout=None):
+            calls.append((url, params))
+            return FakeResponse()
+
+        api._request_with_retry = fake_request
+        result = api.fetch_stock_universe('main', page_size=500)
+
+        self.assertEqual(result['source'], 'eastmoney')
+        self.assertEqual(result['codes'], ['600000', '000001'])
+        self.assertEqual([item['market'] for item in result['stocks']], ['SH', 'SZ'])
+        self.assertIn('m:1+t:2,m:0+t:6', calls[0][1]['fs'])
+        print(f"  外部接口返回: {result['codes']}")
+
+    def test_stock_universe_supports_required_markets(self):
+        print("\n[测试] 股票池支持全A/创业板/科创板")
+        api = StockAPIProvider()
+        seen_fs = []
+
+        class FakeResponse:
+            def json(self):
+                return {
+                    'data': {
+                        'total': 1,
+                        'diff': [{'f12': '300001', 'f13': 0, 'f14': '测试股票', 'f20': 1, 'f21': 1, 'f100': '测试'}]
+                    }
+                }
+
+        def fake_request(url, params=None, headers=None, timeout=None):
+            seen_fs.append(params['fs'])
+            return FakeResponse()
+
+        api._request_with_retry = fake_request
+
+        api.fetch_stock_universe('a_share', limit=1)
+        api.fetch_stock_universe('gem', limit=1)
+        api.fetch_stock_universe('star', limit=1)
+
+        self.assertIn('m:1+t:23', seen_fs[0])
+        self.assertIn('m:0+t:80', seen_fs[0])
+        self.assertEqual(seen_fs[1], 'm:0+t:80')
+        self.assertEqual(seen_fs[2], 'm:1+t:23')
+        print("  全A/创业板/科创板范围参数已覆盖")
+
+
+class TestMCPToolBoundaries(unittest.TestCase):
+
+    def test_mcp_does_not_expose_cache_stats_as_analysis_source(self):
+        tool_names = [tool['name'] for tool in mcp_server.TOOLS]
+
+        self.assertIn('screen_market', tool_names)
+        self.assertIn('start_market_sync', tool_names)
+        self.assertIn('get_market_sync_status', tool_names)
+        self.assertIn('cancel_market_sync', tool_names)
+        self.assertNotIn('get_cache_stats', tool_names)
+        self.assertNotIn('get_db_stats', tool_names)
+        self.assertIn('screen_main_board', tool_names)
+
+        legacy_cache = mcp_server.handle_tool_call('get_cache_stats', {})
+        legacy_db = mcp_server.handle_tool_call('get_db_stats', {})
+        no_filter_screen = mcp_server.handle_tool_call('screen_market', {})
+
+        self.assertFalse(legacy_cache['success'])
+        self.assertFalse(legacy_db['success'])
+        self.assertFalse(no_filter_screen['success'])
+        self.assertNotIn('data', legacy_cache)
+        self.assertNotIn('data', legacy_db)
+        self.assertIn('screen_market', legacy_cache['error'])
+        self.assertIn('筛选条件', no_filter_screen['error'])
+        print("  MCP未暴露缓存统计为分析入口")
+
+    def test_market_sync_job_lifecycle(self):
+        print("\n[测试] MCP市场同步任务生命周期")
+        original_sync_market = mcp_server.pool.sync_market
+        with mcp_server.SYNC_JOBS_LOCK:
+            mcp_server.SYNC_JOBS.clear()
+
+        def fake_sync_market(**kwargs):
+            progress_callback = kwargs.get('progress_callback')
+            if progress_callback:
+                progress_callback({
+                    'success': True,
+                    'board': kwargs.get('board'),
+                    'refresh': kwargs.get('refresh'),
+                    'total': 2,
+                    'scanned': 1,
+                    'refreshed': 1,
+                    'skipped_fresh': 0,
+                    'failed': 0,
+                    'current_code': '000001',
+                })
+            return {
+                'success': True,
+                'board': kwargs.get('board'),
+                'refresh': kwargs.get('refresh'),
+                'total': 2,
+                'scanned': 2,
+                'refreshed': 2,
+                'skipped_fresh': 0,
+                'failed': 0,
+                'stopped': False,
+                'current_code': None,
+                'failures': [],
+            }
+
+        try:
+            mcp_server.pool.sync_market = fake_sync_market
+            started = mcp_server.handle_tool_call('start_market_sync', {
+                'board': 'gem',
+                'refresh': 'stale',
+                'max_codes': 2,
+                'delay': 0,
+            })
+            self.assertTrue(started['success'])
+            job_id = started['job']['job_id']
+
+            status = None
+            for _ in range(50):
+                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
+                if status['success'] and status['job']['status'] == 'completed':
+                    break
+                time.sleep(0.02)
+
+            self.assertTrue(status['success'])
+            self.assertEqual(status['job']['status'], 'completed')
+            self.assertEqual(status['job']['result']['refreshed'], 2)
+
+            with mcp_server.SYNC_JOBS_LOCK:
+                mcp_server.SYNC_JOBS.clear()
+            persisted_status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
+            self.assertTrue(persisted_status['success'])
+            self.assertEqual(persisted_status['job']['status'], 'completed')
+            self.assertEqual(persisted_status['job']['result']['refreshed'], 2)
+
+            listed = mcp_server.handle_tool_call('get_market_sync_status', {})
+            self.assertTrue(listed['success'])
+            self.assertGreaterEqual(len(listed['jobs']), 1)
+            print(f"  同步任务完成: {job_id}")
+        finally:
+            mcp_server.pool.sync_market = original_sync_market
+
+    def test_mcp_rejects_large_small_batch_tools(self):
+        print("\n[测试] MCP拒绝过大的小批量请求")
+        detail_codes = [f'{i:06d}' for i in range(mcp_server.MAX_DETAIL_CODES + 1)]
+        update_codes = [f'{i:06d}' for i in range(mcp_server.MAX_UPDATE_CODES + 1)]
+        realtime_codes = [f'{i:06d}' for i in range(mcp_server.MAX_REALTIME_CODES + 1)]
+
+        latest = mcp_server.handle_tool_call('get_latest_data', {'codes': detail_codes})
+        update = mcp_server.handle_tool_call('update_stocks', {'codes': update_codes})
+        realtime = mcp_server.handle_tool_call('get_realtime_prices', {'codes': realtime_codes})
+
+        self.assertFalse(latest['success'])
+        self.assertFalse(update['success'])
+        self.assertFalse(realtime['success'])
+        self.assertIn('screen_market', latest['error'])
+        self.assertIn('start_market_sync', update['error'])
+        self.assertIn('逐只或小批次', realtime['error'])
+        print("  大列表已被引导到筛选/同步流程")
 
 
 class TestStockDataPool(unittest.TestCase):
@@ -247,6 +423,217 @@ class TestStockDataPool(unittest.TestCase):
         print(f"  {data[0]['code']} {data[0]['name']}")
         print(f"  收盘价: {data[0]['close']}")
         print(f"  位置: {data[0]['position_pct']:.1f}%")
+
+    def test_batch_latest_data_and_main_board_screen(self):
+        print("\n[测试] 批量快照与全主板筛选")
+        pool = StockDataPool(':memory:')
+
+        class FakeAPI:
+            def __init__(self):
+                self.realtime_calls = []
+
+            def fetch_stock_universe(self, board='main', limit=None, page_size=100):
+                codes = ['000001', '000002', '000003']
+                if limit:
+                    codes = codes[:limit]
+                return {
+                    'board': board,
+                    'source': 'fake',
+                    'total': 3,
+                    'returned': len(codes),
+                    'stocks': [{'code': code} for code in codes],
+                    'codes': codes,
+                }
+
+            def fetch_realtime(self, code):
+                self.realtime_calls.append(code)
+                return None, None
+
+        pool.api = FakeAPI()
+
+        samples = {
+            '000001': [
+                '2024-01-01,10,10,10,10,100,1000',
+                '2024-01-02,10,11,11,10,100,1100',
+            ],
+            '000002': [
+                '2024-01-01,10,10,10,10,100,1000',
+                '2024-01-02,10,8,10,8,100,800',
+            ],
+            '000003': [
+                '2024-01-01,10,10,10,10,100,1000',
+                '2024-01-02,10,9,10,8,100,900',
+            ],
+        }
+
+        valuations = {
+            '000001': {'pe_ttm': 20, 'pb': 2.0, 'market_cap': 1000},
+            '000002': {'pe_ttm': 9, 'pb': 0.9, 'market_cap': 500},
+            '000003': {'pe_ttm': 12, 'pb': 1.1, 'market_cap': 700},
+        }
+
+        for code, klines in samples.items():
+            pool.save_stock_info(code, {'name': f'测试{code}', 'market': 'SZ'})
+            pool.save_daily_data(code, klines)
+            pool.calculate_technical(code)
+            valuation = dict(valuations[code])
+            valuation.update({'data_source': 'fake', 'data_quality': 'full', 'missing_fields': []})
+            pool.save_valuation_data(code, valuation)
+
+        latest = pool.get_latest_data(['000001', '000002', '000003'], include_realtime=False)
+        self.assertEqual([item['code'] for item in latest], ['000001', '000002', '000003'])
+        self.assertEqual(pool.api.realtime_calls, [])
+
+        result = pool.screen_market({
+            'board': 'gem',
+            'position_max': 30,
+            'pe_ttm_max': 15,
+            'limit': 10,
+            'include_realtime': False,
+        })
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['board'], 'gem')
+        self.assertEqual(result['matched_count'], 1)
+        self.assertEqual(result['results'][0]['code'], '000002')
+        self.assertEqual(pool.api.realtime_calls, [])
+        print(f"  筛选命中: {[item['code'] for item in result['results']]}")
+
+    def test_daily_refresh_uses_cache_gap(self):
+        print("\n[测试] 日K刷新按缓存缺口增量拉取")
+        today = '2026-05-07'
+
+        no_data = StockDataPool._calculate_daily_fetch_days({'has_data': False}, 250, today=today)
+        enough_fresh = StockDataPool._calculate_daily_fetch_days({
+            'has_data': True,
+            'latest_date': today,
+            'row_count': 250,
+            'is_today': True,
+        }, 250, today=today)
+        stale_thick = StockDataPool._calculate_daily_fetch_days({
+            'has_data': True,
+            'latest_date': '2026-05-05',
+            'row_count': 250,
+            'is_today': False,
+        }, 250, today=today)
+        stale_thin = StockDataPool._calculate_daily_fetch_days({
+            'has_data': True,
+            'latest_date': '2026-05-05',
+            'row_count': 20,
+            'is_today': False,
+        }, 250, today=today)
+        forced = StockDataPool._calculate_daily_fetch_days({
+            'has_data': True,
+            'latest_date': today,
+            'row_count': 250,
+            'is_today': True,
+        }, 250, force=True, today=today)
+
+        self.assertEqual(no_data, 250)
+        self.assertEqual(enough_fresh, 0)
+        self.assertLess(stale_thick, 250)
+        self.assertGreaterEqual(stale_thick, 5)
+        self.assertEqual(stale_thin, 250)
+        self.assertEqual(forced, 250)
+        print(f"  厚缓存过期2天仅拉取: {stale_thick} 天")
+
+    def test_screen_market_refresh_default_is_bounded(self):
+        print("\n[测试] 市场筛选刷新默认受控")
+        pool = StockDataPool(':memory:')
+        calls = []
+
+        class FakeAPI:
+            def fetch_stock_universe(self, board='a_share', limit=None, page_size=100):
+                codes = [f'000{i:03d}' for i in range(250)]
+                return {'board': board, 'source': 'fake', 'total': 250, 'returned': 250, 'codes': codes, 'stocks': []}
+
+            def fetch_realtime(self, code):
+                return {'name': code, 'price': 1, 'data_source': 'fake', 'data_quality': 'partial', 'missing_fields': []}, 'fake'
+
+        pool.api = FakeAPI()
+
+        def fake_update_stock(code, days=250, delay=1.5, force=False):
+            calls.append((code, days, force))
+
+        pool.update_stock = fake_update_stock
+        result = pool.screen_market({
+            'position_max': 30,
+            'refresh': 'missing',
+            'delay': 0,
+            'allow_no_filters': False,
+        })
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['refresh']['attempted'], 200)
+        self.assertEqual(len(calls), 200)
+        print(f"  默认刷新上限: {result['refresh']['attempted']} 只")
+
+    def test_sync_market_refreshes_only_needed_codes(self):
+        print("\n[测试] 市场同步只刷新需要补齐的股票")
+        pool = StockDataPool(':memory:')
+        refreshed = []
+
+        class FakeAPI:
+            def fetch_stock_universe(self, board='a_share', limit=None, page_size=100):
+                return {
+                    'board': board,
+                    'source': 'fake',
+                    'total': 3,
+                    'returned': 3,
+                    'codes': ['000001', '000002', '000003'],
+                    'stocks': [],
+                }
+
+        pool.api = FakeAPI()
+
+        def fake_freshness(code, data_type='daily'):
+            if code == '000001':
+                return {'has_data': True, 'latest_date': pool.get_current_time_info()['date'], 'row_count': 250, 'is_today': True}
+            if code == '000002':
+                return {'has_data': True, 'latest_date': '2026-05-05', 'row_count': 250, 'is_today': False}
+            return {'has_data': False}
+
+        def fake_update_stock(code, days=250, delay=1.5, force=False):
+            refreshed.append((code, days, force))
+
+        pool.check_data_freshness = fake_freshness
+        pool.update_stock = fake_update_stock
+
+        progress = []
+        result = pool.sync_market(
+            board='a_share',
+            refresh='stale',
+            days=250,
+            delay=0,
+            progress_callback=lambda item: progress.append(item),
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['scanned'], 3)
+        self.assertEqual(result['skipped_fresh'], 1)
+        self.assertEqual(result['refreshed'], 2)
+        self.assertEqual([item[0] for item in refreshed], ['000002', '000003'])
+        self.assertGreaterEqual(len(progress), 2)
+        print(f"  刷新: {[item[0] for item in refreshed]}")
+
+    def test_sync_job_interrupted_on_restart(self):
+        print("\n[测试] 未完成同步任务重启后标记中断")
+        pool = StockDataPool(':memory:')
+        job = {
+            'job_id': 'test-job-1',
+            'status': 'running',
+            'args': {'board': 'a_share'},
+            'progress': {'scanned': 1},
+            'created_at': '2026-05-07T10:00:00+08:00',
+            'updated_at': '2026-05-07T10:00:00+08:00',
+        }
+        pool.save_sync_job(job)
+        pool.mark_running_sync_jobs_interrupted('2026-05-07T10:01:00+08:00')
+
+        stored = pool.get_sync_job('test-job-1')
+        self.assertEqual(stored['status'], 'interrupted')
+        self.assertIn('中断', stored['error'])
+        print(f"  任务状态: {stored['status']}")
     
     def test_realtime_price_bypasses_database_cache(self):
         print("\n[测试] 实时价格直连API且不使用数据库缓存")

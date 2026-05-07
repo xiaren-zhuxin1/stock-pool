@@ -2,7 +2,7 @@
   "mcpServers": {
     "stock-pool": {
       "command": "python",
-      "args": ["c:\\code\\同花顺工具\\stock_pool\\mcp_server.py"],
+      "args": ["mcp_server.py"],
       "env": {}
     }
   }
