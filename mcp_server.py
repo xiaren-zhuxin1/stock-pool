@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import os
+from datetime import datetime, timezone, timedelta
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
@@ -10,11 +11,20 @@ sys.path.insert(0, parent_dir)
 from stock_pool import StockDataPool
 
 pool = StockDataPool()
+SHANGHAI_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 
 TOOLS = [
     {
+        "name": "get_current_time",
+        "description": "获取当前准确时间，默认返回北京时间（Asia/Shanghai），便于确定数据分析截止日期",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+    {
         "name": "update_stock",
-        "description": "更新股票数据，从API拉取K线、估值等数据。如果数据已是最新，则跳过更新",
+        "description": "按给定股票代码更新服务缓存（日K、估值、技术指标等），必要时从外部API拉取；如果缓存已是最新，则跳过更新；不会自动枚举全市场股票",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -27,7 +37,7 @@ TOOLS = [
     },
     {
         "name": "update_stocks",
-        "description": "批量更新多只股票数据",
+        "description": "按给定股票代码列表批量更新服务缓存，必要时从外部API拉取；不会自动枚举全市场股票",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -39,7 +49,7 @@ TOOLS = [
     },
     {
         "name": "get_stock_info",
-        "description": "获取股票基本信息",
+        "description": "获取股票基本信息；服务会优先使用缓存，若该股票尚未更新过，可能返回空",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -50,7 +60,7 @@ TOOLS = [
     },
     {
         "name": "get_daily_data",
-        "description": "获取股票日K线数据",
+        "description": "获取指定股票的日K线数据；服务会优先使用缓存，若需分析新股票，请先调用 update_stock/update_stocks 更新缓存",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -64,7 +74,7 @@ TOOLS = [
     },
     {
         "name": "get_valuation_data",
-        "description": "获取股票估值数据（PE、PB等）",
+        "description": "获取指定股票估值数据（PE、PB等）；服务会优先使用缓存，若需分析新股票，请先调用 update_stock/update_stocks 更新缓存",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -77,7 +87,7 @@ TOOLS = [
     },
     {
         "name": "get_technical_data",
-        "description": "获取股票技术指标数据（MA、位置等）",
+        "description": "获取指定股票技术指标数据（MA、位置等）；技术指标由 update_stock/update_stocks 基于已缓存日K计算",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -90,7 +100,7 @@ TOOLS = [
     },
     {
         "name": "get_latest_data",
-        "description": "获取多只股票的最新数据（综合信息）",
+        "description": "获取给定股票列表的最新综合数据；服务会优先使用缓存，仅返回已有可用数据的股票，不会自动扩展到全市场",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -101,7 +111,7 @@ TOOLS = [
     },
     {
         "name": "get_realtime_price",
-        "description": "实时获取单只股票当前价格和估值，直接调用外部API，不使用数据库缓存",
+        "description": "按给定股票代码实时获取当前价格和估值，直接调用外部API，不使用服务缓存；不支持自动发现股票代码",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -112,7 +122,7 @@ TOOLS = [
     },
     {
         "name": "get_realtime_prices",
-        "description": "批量实时获取股票当前价格和估值，直接调用外部API，不使用数据库缓存",
+        "description": "按给定股票代码列表批量实时获取当前价格和估值，直接调用外部API，不使用服务缓存；不支持自动发现股票代码",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -124,7 +134,7 @@ TOOLS = [
     },
     {
         "name": "analyze_position",
-        "description": "分析股票52周位置，返回低位/中位/高位分类",
+        "description": "基于给定股票列表的可用历史数据分析52周位置，返回低位/中位/高位分类；服务会优先使用缓存；不是全市场筛选器",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -135,7 +145,7 @@ TOOLS = [
     },
     {
         "name": "check_missing_data",
-        "description": "检查股票数据是否缺失",
+        "description": "检查给定股票列表在服务缓存中的日K数据是否缺失，可用于判断是否需要先 update_stock/update_stocks",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -147,8 +157,8 @@ TOOLS = [
         }
     },
     {
-        "name": "get_db_stats",
-        "description": "获取数据库统计信息",
+        "name": "get_cache_stats",
+        "description": "获取服务内部缓存统计信息，可用于了解当前缓存覆盖了多少股票和数据范围",
         "inputSchema": {
             "type": "object",
             "properties": {}
@@ -156,7 +166,7 @@ TOOLS = [
     },
     {
         "name": "update_minute_data",
-        "description": "更新股票分钟K线数据。如果数据已是最新（5分钟内），则跳过更新",
+        "description": "按给定股票代码更新服务的分钟K线缓存，必要时从外部API拉取。如果缓存已是最新（5分钟内），则跳过更新；不会自动枚举全市场股票",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -170,7 +180,7 @@ TOOLS = [
     },
     {
         "name": "get_minute_data",
-        "description": "获取股票分钟K线数据",
+        "description": "获取指定股票分钟K线数据；服务会优先使用缓存，若需分析新股票，请先调用 update_minute_data 更新缓存",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -185,7 +195,7 @@ TOOLS = [
     },
     {
         "name": "analyze_intraday",
-        "description": "分析股票日内走势，包括上午复盘、下午预测和概率计算",
+        "description": "基于指定股票的可用日K、技术指标和分钟K线分析日内走势；服务会优先使用缓存，若数据为空，请先 update_stock 和 update_minute_data",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -199,7 +209,21 @@ TOOLS = [
 
 def handle_tool_call(name, arguments):
     try:
-        if name == "update_stock":
+        if name == "get_current_time":
+            now = datetime.now(SHANGHAI_TZ)
+            return {
+                "success": True,
+                "data": {
+                    "timezone": "Asia/Shanghai",
+                    "utc_offset": "+08:00",
+                    "datetime": now.isoformat(timespec="seconds"),
+                    "date": now.date().isoformat(),
+                    "time": now.time().isoformat(timespec="seconds"),
+                    "timestamp": int(now.timestamp())
+                }
+            }
+
+        elif name == "update_stock":
             code = arguments.get("code")
             days = arguments.get("days", 250)
             force = arguments.get("force", False)
@@ -267,7 +291,7 @@ def handle_tool_call(name, arguments):
             data = pool.check_missing_data(codes, start_date, end_date)
             return {"success": True, "data": data}
         
-        elif name == "get_db_stats":
+        elif name in ("get_cache_stats", "get_db_stats"):
             data = pool.get_db_stats()
             return {"success": True, "data": data}
         

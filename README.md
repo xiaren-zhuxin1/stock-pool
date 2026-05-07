@@ -1,16 +1,18 @@
 # 股票数据池
 
-本地股票数据存储和分析模块，支持MCP协议。
+股票数据缓存和分析服务，支持MCP协议。
 
 ## 功能
 
-- 本地SQLite数据库存储股票数据
+- 使用内部缓存减少重复API调用
 - 多表设计：基本信息、日K线、估值、财务、资金流向、技术指标、分钟K线
 - 自动检查数据完整性，只拉取缺失数据
-- 实时行情工具直接调用外部API，不使用数据库缓存
+- 实时行情工具直接调用外部API，不使用服务缓存
+- 提供当前时间工具，便于AI Agent确定数据分析截止日期
 - 支持52周滚动位置分析、估值分析
 - 支持常用技术指标：MA、EMA、MACD、RSI、KDJ、BOLL、ATR、OBV
 - 提供MCP服务器，支持AI模型直接调用
+- 当前 MCP 工具以“给定股票代码/代码列表”为输入，不提供全市场或全主板自动枚举与筛选能力
 - **多API源降级机制**
 - 查询 LIMIT 参数强制校验，降低 SQL 拼接风险
 - 项目日志默认输出到 stderr，避免污染 MCP JSON-RPC stdout 通道
@@ -46,7 +48,9 @@
 | 429限流 | 立即切换API |
 | 数据异常 | 切换API |
 
-## 数据库设计
+## 内部缓存设计
+
+> 说明：SQLite 只是服务内部缓存实现，用于减少外部 API 调用和加速重复分析；对 Agent 暴露的是“股票数据服务”能力，而不是数据库操作能力。
 
 ### 表结构
 
@@ -122,7 +126,7 @@ pool = StockDataPool()
 # 更新数据
 pool.update_stocks(['601138', '600487'], days=250)
 
-# 获取最新数据
+# 获取最新数据（服务优先使用缓存）
 data = pool.get_latest_data(['601138', '600487'])
 
 # 分析位置
@@ -142,25 +146,33 @@ python mcp_server.py
 
 配置文件：`mcp_config.json`
 
+#### 能力边界
+
+- `update_stock` / `update_stocks` / `update_minute_data`：按用户或 Agent 提供的股票代码更新服务缓存，必要时从外部 API 拉取数据。
+- `get_daily_data` / `get_valuation_data` / `get_technical_data` / `get_latest_data` / `analyze_position` / `analyze_intraday`：面向调用方表现为获取/分析股票数据；服务内部会优先使用缓存，避免重复 API 调用。
+- `get_realtime_price` / `get_realtime_prices`：按给定股票代码直连外部 API 获取实时行情，不使用服务缓存，但也不负责发现股票代码。
+- 当前服务**不是全市场/全主板选股器**：如果要“在整个主板找股票”，需要先提供候选股票代码列表，或后续新增“获取主板股票列表/全市场股票池”的工具，再配合批量更新与分析工具使用。
+
 #### MCP工具列表
 
 | 工具 | 说明 |
 |------|------|
-| update_stock | 更新单只股票 |
-| update_stocks | 批量更新股票 |
-| get_stock_info | 获取基本信息 |
-| get_daily_data | 获取日K线 |
-| get_valuation_data | 获取估值数据 |
-| get_technical_data | 获取技术指标 |
-| get_latest_data | 获取最新数据 |
-| get_realtime_price | 实时获取单只股票当前价格，直连外部API，不使用数据库缓存 |
-| get_realtime_prices | 批量实时获取股票当前价格，直连外部API，不使用数据库缓存 |
-| analyze_position | 分析52周位置 |
-| check_missing_data | 检查缺失数据 |
-| get_db_stats | 获取数据库统计 |
-| update_minute_data | 更新分钟K线 |
-| get_minute_data | 获取分钟K线 |
-| analyze_intraday | 日内走势分析 |
+| get_current_time | 获取当前北京时间（Asia/Shanghai），用于确定分析截止日期 |
+| update_stock | 按给定代码更新单只股票服务缓存，不自动枚举全市场 |
+| update_stocks | 按给定代码列表批量更新股票服务缓存，不自动枚举全市场 |
+| get_stock_info | 获取股票基本信息，服务优先使用缓存 |
+| get_daily_data | 获取日K线，服务优先使用缓存 |
+| get_valuation_data | 获取估值数据，服务优先使用缓存 |
+| get_technical_data | 获取技术指标，服务优先使用缓存 |
+| get_latest_data | 获取给定代码列表的最新数据，服务优先使用缓存 |
+| get_realtime_price | 实时获取单只股票当前价格，直连外部API，不使用服务缓存 |
+| get_realtime_prices | 批量实时获取股票当前价格，直连外部API，不使用服务缓存 |
+| analyze_position | 基于给定代码列表的可用历史数据分析52周位置，不是全市场筛选器 |
+| check_missing_data | 检查给定代码列表在服务缓存中的缺失数据 |
+| get_cache_stats | 获取服务内部缓存统计 |
+| update_minute_data | 按给定代码更新分钟K线缓存 |
+| get_minute_data | 获取分钟K线，服务优先使用缓存 |
+| analyze_intraday | 基于可用日K、技术指标和分钟K线做日内走势分析 |
 
 ## 分析逻辑
 
@@ -188,14 +200,14 @@ stock_pool/
 ├── api_provider.py   # API提供者（降级机制）
 ├── mcp_server.py     # MCP服务器
 ├── mcp_config.json   # MCP配置
-├── stock_pool.db     # SQLite数据库
+├── stock_pool.db     # 内部缓存文件
 └── README.md         # 文档
 ```
 
 ## 注意事项
 
 1. API有调用限制，建议设置延迟1.5-2秒
-2. 数据库文件会随时间增长
+2. 内部缓存文件会随时间增长
 3. MCP服务器需要Python 3.7+
 4. API降级机制自动处理超时和限流
 5. `stock_finance` 和 `stock_fund_flow` 表结构已保留，但财务/资金流向拉取仍需后续实现
