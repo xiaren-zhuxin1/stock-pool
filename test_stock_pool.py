@@ -357,6 +357,62 @@ class TestMCPToolBoundaries(unittest.TestCase):
             with mcp_server.SYNC_JOBS_LOCK:
                 mcp_server.SYNC_JOBS.clear()
 
+    def test_mcp_update_stocks_progress_and_delay(self):
+        print("\n[测试] MCP后台更新进度和delay参数")
+        original_update_stock = mcp_server.pool.update_stock
+        with mcp_server.SYNC_JOBS_LOCK:
+            mcp_server.SYNC_JOBS.clear()
+
+        updated = []
+        call_times = []
+
+        def fake_update_stock(code, days=250, delay=1.5, force=False):
+            updated.append((code, days, delay, force))
+            call_times.append(time.time())
+
+        try:
+            mcp_server.pool.update_stock = fake_update_stock
+            codes = [f'{i:06d}' for i in range(mcp_server.MAX_INLINE_UPDATE_CODES + 1)]
+            started = mcp_server.handle_tool_call('update_stocks', {
+                'codes': codes,
+                'days': 10,
+                'delay': 0.1,
+                'force': True,
+            })
+
+            self.assertTrue(started['success'])
+            self.assertIn('job', started, "应启动后台任务")
+            job_id = started['job']['job_id']
+
+            status = None
+            for _ in range(30):
+                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
+                if status['job']['status'] == 'completed':
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(status['job']['status'], 'completed')
+            result = status['job']['result']
+            
+            self.assertEqual(result['total'], len(codes))
+            self.assertEqual(result['scanned'], len(codes), "scanned应等于total")
+            self.assertEqual(result['updated'], len(codes))
+            self.assertIsNone(result['current_code'], "任务完成后current_code应为None")
+            
+            self.assertEqual(len(updated), len(codes))
+            for i, (code, days, delay, force) in enumerate(updated):
+                self.assertEqual(code, codes[i])
+                self.assertEqual(days, 10)
+                self.assertEqual(delay, 0.1, f"delay应正确传递，实际为{delay}")
+                self.assertTrue(force, "force应正确传递")
+            
+            print(f"  进度验证通过: scanned={result['scanned']}, updated={result['updated']}")
+            print(f"  delay验证通过: 所有调用delay=0.1")
+        finally:
+            mcp_server.pool.update_stock = original_update_stock
+            with mcp_server.SYNC_JOBS_LOCK:
+                mcp_server.SYNC_JOBS.clear()
+
     def test_mcp_heavy_screen_market_runs_in_background(self):
         print("\n[测试] MCP重筛选转后台任务")
         original_screen_market = mcp_server.pool.screen_market

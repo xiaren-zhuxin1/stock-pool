@@ -4,6 +4,24 @@ import random
 from datetime import datetime
 import sys
 import builtins
+from typing import Optional, List, Dict, Any, Tuple
+from enum import Enum
+
+
+class APIErrorType(Enum):
+    TIMEOUT = "timeout"
+    CONNECTION_ERROR = "connection_error"
+    RATE_LIMITED = "rate_limited"
+    HTTP_ERROR = "http_error"
+    DATA_ERROR = "data_error"
+    UNKNOWN = "unknown"
+
+
+class APIError(Exception):
+    def __init__(self, error_type: APIErrorType, message: str, api_name: Optional[str] = None):
+        self.error_type = error_type
+        self.api_name = api_name
+        super().__init__(message)
 
 
 def print(*args, **kwargs):
@@ -13,21 +31,21 @@ def print(*args, **kwargs):
 
 class StockAPIProvider:
     
-    def __init__(self):
-        self.timeout = 15
-        self.max_retries = 3
-        self.retry_delay = 1
+    def __init__(self) -> None:
+        self.timeout: int = 15
+        self.max_retries: int = 3
+        self.retry_delay: int = 1
         
-        self.api_status = {
+        self.api_status: Dict[str, Dict[str, Any]] = {
             'eastmoney': {'available': True, 'last_error': None, 'error_count': 0},
             'sina': {'available': True, 'last_error': None, 'error_count': 0},
             'tencent': {'available': True, 'last_error': None, 'error_count': 0},
             'netease': {'available': True, 'last_error': None, 'error_count': 0},
         }
         
-        self.api_priority = ['eastmoney', 'sina', 'tencent', 'netease']
+        self.api_priority: List[str] = ['eastmoney', 'sina', 'tencent', 'netease']
     
-    def _get_headers(self, referer=None):
+    def _get_headers(self, referer: Optional[str] = None) -> Dict[str, str]:
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
@@ -44,7 +62,13 @@ class StockAPIProvider:
             headers['Origin'] = referer.rstrip('/') if referer else None
         return headers
     
-    def _request_with_retry(self, url, params=None, headers=None, timeout=None):
+    def _request_with_retry(
+        self,
+        url: str,
+        params: Optional[Dict[str, Any]] = None,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: Optional[int] = None,
+    ) -> Optional[requests.Response]:
         timeout = timeout or self.timeout
         
         for attempt in range(self.max_retries):
@@ -60,25 +84,27 @@ class StockAPIProvider:
                     wait_time = 60 + random.uniform(0, 10)
                     print(f"  限流，等待 {wait_time:.1f} 秒...")
                     time.sleep(wait_time)
-                    raise Exception("Rate limited")
+                    raise APIError(APIErrorType.RATE_LIMITED, f"API限流，已等待{wait_time:.1f}秒")
                 else:
-                    raise Exception(f"HTTP {response.status_code}")
+                    raise APIError(APIErrorType.HTTP_ERROR, f"HTTP错误: {response.status_code}")
             except requests.exceptions.Timeout:
                 if attempt < self.max_retries - 1:
                     print(f"  超时，重试 {attempt + 2}/{self.max_retries}...")
                     continue
-                raise Exception("Timeout")
+                raise APIError(APIErrorType.TIMEOUT, "请求超时")
             except requests.exceptions.ConnectionError:
                 if attempt < self.max_retries - 1:
                     print(f"  连接错误，重试 {attempt + 2}/{self.max_retries}...")
                     continue
-                raise Exception("Connection error")
+                raise APIError(APIErrorType.CONNECTION_ERROR, "连接错误")
+            except APIError:
+                raise
             except Exception as e:
-                raise e
+                raise APIError(APIErrorType.UNKNOWN, f"未知错误: {str(e)}")
         
         return None
     
-    def _mark_api_error(self, api_name, error):
+    def _mark_api_error(self, api_name: str, error: Any) -> None:
         self.api_status[api_name]['error_count'] += 1
         self.api_status[api_name]['last_error'] = str(error)
         
@@ -86,11 +112,11 @@ class StockAPIProvider:
             self.api_status[api_name]['available'] = False
             print(f"  [API降级] {api_name} 暂时不可用: {error}")
     
-    def _mark_api_success(self, api_name):
+    def _mark_api_success(self, api_name: str) -> None:
         self.api_status[api_name]['error_count'] = 0
         self.api_status[api_name]['available'] = True
     
-    def get_available_api(self):
+    def get_available_api(self) -> str:
         for api_name in self.api_priority:
             if self.api_status[api_name]['available']:
                 return api_name
@@ -99,6 +125,17 @@ class StockAPIProvider:
             self.api_status[api_name]['error_count'] = 0
         return self.api_priority[0]
     
+    def _normalize_realtime_data(self, result: Dict[str, Any], data_source: str, allow_partial_full: bool = False) -> Dict[str, Any]:
+        result['data_source'] = data_source
+
+        missing_fields = [
+            k for k, v in result.items()
+            if k not in ['data_source', 'data_quality', 'missing_fields'] and v is None
+        ]
+        result['missing_fields'] = missing_fields
+        result['data_quality'] = 'full' if not missing_fields or (allow_partial_full and len(missing_fields) < 3) else 'partial'
+        return result
+
     def fetch_kline_eastmoney(self, code, days=250):
         try:
             market = '1' if code.startswith('6') else '0'
@@ -425,18 +462,9 @@ class StockAPIProvider:
                         'pb': d.get('f51', 0) / 100 if d.get('f51') else None,
                         'market_cap': d.get('f116', 0) if d.get('f116') else None,
                         'circ_market_cap': d.get('f117', 0) if d.get('f117') else None,
-                        'data_source': 'eastmoney',
-                        'data_quality': 'full',
                     }
                     
-                    missing_fields = [k for k, v in result.items() 
-                                    if k not in ['data_source', 'data_quality', 'missing_fields'] 
-                                    and v is None]
-                    result['missing_fields'] = missing_fields
-                    if missing_fields:
-                        result['data_quality'] = 'partial'
-                    
-                    return result
+                    return self._normalize_realtime_data(result, 'eastmoney')
         except Exception as e:
             self._mark_api_error('eastmoney', e)
         return None
@@ -467,11 +495,8 @@ class StockAPIProvider:
                                 'pb': None,
                                 'market_cap': None,
                                 'circ_market_cap': None,
-                                'data_source': 'sina',
-                                'data_quality': 'partial',
-                                'missing_fields': ['pe_ttm', 'pe_lyr', 'pb', 'market_cap', 'circ_market_cap'],
                             }
-                            return result
+                            return self._normalize_realtime_data(result, 'sina')
         except Exception as e:
             self._mark_api_error('sina', e)
         return None
@@ -500,18 +525,9 @@ class StockAPIProvider:
                             'pb': float(parts[46]) if len(parts) > 46 and parts[46] else None,
                             'market_cap': float(parts[45]) * 100000000 if len(parts) > 45 and parts[45] else None,
                             'circ_market_cap': None,
-                            'data_source': 'tencent',
-                            'data_quality': 'partial',
                         }
                         
-                        missing_fields = [k for k, v in result.items() 
-                                        if k not in ['data_source', 'data_quality', 'missing_fields'] 
-                                        and v is None]
-                        result['missing_fields'] = missing_fields
-                        if len(missing_fields) < 3:
-                            result['data_quality'] = 'full'
-                        
-                        return result
+                        return self._normalize_realtime_data(result, 'tencent', allow_partial_full=True)
         except Exception as e:
             self._mark_api_error('tencent', e)
         return None
@@ -543,18 +559,9 @@ class StockAPIProvider:
                             'pb': stock_data.get('pb'),
                             'market_cap': stock_data.get('market_cap'),
                             'circ_market_cap': None,
-                            'data_source': 'netease',
-                            'data_quality': 'partial',
                         }
                         
-                        missing_fields = [k for k, v in result.items() 
-                                        if k not in ['data_source', 'data_quality', 'missing_fields'] 
-                                        and v is None]
-                        result['missing_fields'] = missing_fields
-                        if len(missing_fields) < 3:
-                            result['data_quality'] = 'full'
-                        
-                        return result
+                        return self._normalize_realtime_data(result, 'netease', allow_partial_full=True)
         except Exception as e:
             self._mark_api_error('netease', e)
         return None

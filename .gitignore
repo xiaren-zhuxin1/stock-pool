@@ -12,8 +12,13 @@ __pycache__/
 .venv/
 venv/
 .env
+.env.example
 .vscode/
 .idea/
+
+# Documentation and examples
+REFACTOR_TODO.md
+secure_config_example.py
 
 # Logs and temporary files
 *.log

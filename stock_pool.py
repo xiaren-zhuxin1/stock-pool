@@ -1,10 +1,11 @@
-﻿import sqlite3
+import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 import os
 import sys
-import math
 import builtins
+from typing import Optional, List, Dict, Any
+from contextlib import contextmanager
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -20,31 +21,86 @@ def print(*args, **kwargs):
 
 try:
     from .api_provider import StockAPIProvider
+    from .indicators import calculate_ma, calculate_technical_indicators, ema, rsi
+    from .sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
+    from .storage import (
+        init_database_schema,
+        save_stock_info as storage_save_stock_info,
+        save_daily_data as storage_save_daily_data,
+        save_valuation_data as storage_save_valuation_data,
+        save_technical_data as storage_save_technical_data,
+        get_stock_info as storage_get_stock_info,
+        get_daily_data as storage_get_daily_data,
+        get_valuation_data as storage_get_valuation_data,
+        get_technical_data as storage_get_technical_data,
+        get_daily_data_for_technical,
+        check_data_freshness as storage_check_data_freshness,
+    )
+    from .minute_data import (
+        save_minute_data as minute_save_minute_data,
+        get_minute_data as minute_get_minute_data,
+        minute_fetch_days_for_range,
+        minute_kline_range,
+        seconds_until_intraday_data,
+        intraday_resolution,
+    )
 except ImportError:
     from api_provider import StockAPIProvider
+    from indicators import calculate_ma, calculate_technical_indicators, ema, rsi
+    from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
+    from storage import (
+        init_database_schema,
+        save_stock_info as storage_save_stock_info,
+        save_daily_data as storage_save_daily_data,
+        save_valuation_data as storage_save_valuation_data,
+        save_technical_data as storage_save_technical_data,
+        get_stock_info as storage_get_stock_info,
+        get_daily_data as storage_get_daily_data,
+        get_valuation_data as storage_get_valuation_data,
+        get_technical_data as storage_get_technical_data,
+        get_daily_data_for_technical,
+        check_data_freshness as storage_check_data_freshness,
+    )
+    from minute_data import (
+        save_minute_data as minute_save_minute_data,
+        get_minute_data as minute_get_minute_data,
+        minute_fetch_days_for_range,
+        minute_kline_range,
+        seconds_until_intraday_data,
+        intraday_resolution,
+    )
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock_pool.db')
 SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
 class StockDataPool:
     
-    def __init__(self, db_path=None):
-        self._sqlite_uri = False
-        self._memory_keeper = None
+    def __init__(self, db_path: Optional[str] = None) -> None:
+        self._sqlite_uri: bool = False
+        self._memory_keeper: Optional[sqlite3.Connection] = None
         if db_path == ':memory:':
-            self.db_path = f"file:stock_pool_memory_{id(self)}?mode=memory&cache=shared"
+            self.db_path: str = f"file:stock_pool_memory_{id(self)}?mode=memory&cache=shared"
             self._sqlite_uri = True
             self._memory_keeper = sqlite3.connect(self.db_path, uri=True)
         else:
             self.db_path = db_path or DB_PATH
-        self.api = StockAPIProvider()
+        self.api: StockAPIProvider = StockAPIProvider()
         self._init_db()
-    
-    def _connect(self):
+        self.sync_jobs = SyncJobStore(self._connect, self._normalize_positive_int, self.get_current_time_info)
+
+    def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, uri=self._sqlite_uri)
 
+    @contextmanager
+    def _get_connection(self) -> Any:
+        conn = self._connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
     @staticmethod
-    def get_current_time_info(now=None):
+    def get_current_time_info(now: Optional[datetime] = None) -> Dict[str, Any]:
         """返回 Agent 分析前必须使用的北京时间与 A 股交易时段状态。"""
         if now is None:
             now = datetime.now(SHANGHAI_TZ)
@@ -82,7 +138,7 @@ class StockDataPool:
             'trading_session': trading_session,
         }
 
-    def _request_includes_today(self, start_date=None, end_date=None):
+    def _request_includes_today(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> bool:
         today = self.get_current_time_info()['date']
         if start_date and start_date > today:
             return False
@@ -90,7 +146,7 @@ class StockDataPool:
             return False
         return True
 
-    def _merge_realtime_snapshot(self, item, realtime, time_info):
+    def _merge_realtime_snapshot(self, item: Dict[str, Any], realtime: Optional[Dict[str, Any]], time_info: Dict[str, Any]) -> Dict[str, Any]:
         if not realtime or not realtime.get('success'):
             item.update({
                 'realtime_used': False,
@@ -120,320 +176,36 @@ class StockDataPool:
     
     def _init_db(self):
         conn = self._connect()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock_info (
-                code TEXT PRIMARY KEY,
-                name TEXT,
-                market TEXT,
-                sector TEXT,
-                industry TEXT,
-                list_date TEXT,
-                created_at TEXT,
-                updated_at TEXT
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock_daily (
-                id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
-                data_date TEXT NOT NULL,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume REAL,
-                amount REAL,
-                turnover REAL,
-                change_pct REAL,
-                amplitude REAL,
-                created_at TEXT,
-                UNIQUE(code, data_date)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock_valuation (
-                id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
-                data_date TEXT NOT NULL,
-                pe_ttm REAL,
-                pe_lyr REAL,
-                pb REAL,
-                ps_ttm REAL,
-                market_cap REAL,
-                circ_market_cap REAL,
-                total_share REAL,
-                circ_share REAL,
-                data_source TEXT,
-                data_quality TEXT,
-                missing_fields TEXT,
-                created_at TEXT,
-                UNIQUE(code, data_date)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock_finance (
-                id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
-                report_date TEXT NOT NULL,
-                revenue REAL,
-                revenue_yoy REAL,
-                net_profit REAL,
-                net_profit_yoy REAL,
-                gross_margin REAL,
-                net_margin REAL,
-                roe REAL,
-                roa REAL,
-                debt_ratio REAL,
-                current_ratio REAL,
-                created_at TEXT,
-                UNIQUE(code, report_date)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock_fund_flow (
-                id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
-                data_date TEXT NOT NULL,
-                main_net_inflow REAL,
-                main_net_inflow_pct REAL,
-                super_net_inflow REAL,
-                big_net_inflow REAL,
-                mid_net_inflow REAL,
-                small_net_inflow REAL,
-                created_at TEXT,
-                UNIQUE(code, data_date)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock_technical (
-                id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
-                data_date TEXT NOT NULL,
-                ma5 REAL,
-                ma10 REAL,
-                ma20 REAL,
-                ma60 REAL,
-                ema12 REAL,
-                ema26 REAL,
-                macd REAL,
-                macd_signal REAL,
-                macd_hist REAL,
-                rsi_6 REAL,
-                rsi_12 REAL,
-                rsi_24 REAL,
-                kdj_k REAL,
-                kdj_d REAL,
-                kdj_j REAL,
-                boll_upper REAL,
-                boll_mid REAL,
-                boll_lower REAL,
-                atr REAL,
-                obv REAL,
-                high_52w REAL,
-                low_52w REAL,
-                position_pct REAL,
-                year_change_pct REAL,
-                created_at TEXT,
-                UNIQUE(code, data_date)
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS stock_minute (
-                id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
-                data_time TEXT NOT NULL,
-                klt INTEGER NOT NULL,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume REAL,
-                amount REAL,
-                created_at TEXT,
-                UNIQUE(code, data_time, klt)
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS service_sync_jobs (
-                job_id TEXT PRIMARY KEY,
-                status TEXT NOT NULL,
-                args_json TEXT,
-                progress_json TEXT,
-                result_json TEXT,
-                error TEXT,
-                created_at TEXT,
-                updated_at TEXT,
-                finished_at TEXT
-            )
-        ''')
-        
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_code_date ON stock_daily(code, data_date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_date ON stock_daily(data_date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_valuation_code_date ON stock_valuation(code, data_date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_fund_flow_code_date ON stock_fund_flow(code, data_date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_technical_code_date ON stock_technical(code, data_date)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_code_time ON stock_minute(code, data_time)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_time ON stock_minute(data_time)')
-        cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_jobs_updated ON service_sync_jobs(updated_at)')
-        self._ensure_column(cursor, 'stock_technical', 'atr', 'REAL')
-        self._ensure_column(cursor, 'stock_technical', 'obv', 'REAL')
-        
-        conn.commit()
+        init_database_schema(conn)
         conn.close()
 
     @staticmethod
     def _json_dumps(value):
-        import json
-        return json.dumps(value if value is not None else {}, ensure_ascii=False, default=str)
+        return json_dumps(value)
 
     @staticmethod
     def _json_loads(value, default=None):
-        import json
-        if not value:
-            return {} if default is None else default
-        try:
-            return json.loads(value)
-        except (TypeError, ValueError):
-            return {} if default is None else default
+        return json_loads(value, default)
 
     @staticmethod
     def _sync_job_from_row(row):
-        if not row:
-            return None
-        return {
-            'job_id': row[0],
-            'status': row[1],
-            'args': StockDataPool._json_loads(row[2]),
-            'progress': StockDataPool._json_loads(row[3]),
-            'result': StockDataPool._json_loads(row[4], None) if row[4] else None,
-            'error': row[5],
-            'created_at': row[6],
-            'updated_at': row[7],
-            'finished_at': row[8],
-        }
+        return sync_job_from_row(row)
 
     def save_sync_job(self, job):
-        conn = self._connect()
-        try:
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR REPLACE INTO service_sync_jobs
-                (job_id, status, args_json, progress_json, result_json, error, created_at, updated_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                job.get('job_id'),
-                job.get('status'),
-                self._json_dumps(job.get('args')),
-                self._json_dumps(job.get('progress')),
-                self._json_dumps(job.get('result')) if job.get('result') is not None else None,
-                job.get('error'),
-                job.get('created_at'),
-                job.get('updated_at'),
-                job.get('finished_at'),
-            ))
-            conn.commit()
-        finally:
-            conn.close()
+        self.sync_jobs.save(job)
 
     def update_sync_job(self, job_id, **fields):
-        if not fields:
-            return
-        allowed = {
-            'status': 'status',
-            'args': 'args_json',
-            'progress': 'progress_json',
-            'result': 'result_json',
-            'error': 'error',
-            'created_at': 'created_at',
-            'updated_at': 'updated_at',
-            'finished_at': 'finished_at',
-        }
-        sets = []
-        params = []
-        for key, value in fields.items():
-            column = allowed.get(key)
-            if not column:
-                continue
-            sets.append(f'{column} = ?')
-            if key in ('args', 'progress', 'result'):
-                params.append(self._json_dumps(value) if value is not None else None)
-            else:
-                params.append(value)
-        if not sets:
-            return
-        params.append(job_id)
-        conn = self._connect()
-        try:
-            cursor = conn.cursor()
-            cursor.execute(f'''
-                UPDATE service_sync_jobs
-                SET {', '.join(sets)}
-                WHERE job_id = ?
-            ''', params)
-            conn.commit()
-        finally:
-            conn.close()
+        self.sync_jobs.update(job_id, **fields)
 
     def get_sync_job(self, job_id):
-        conn = self._connect()
-        try:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT job_id, status, args_json, progress_json, result_json, error, created_at, updated_at, finished_at
-                FROM service_sync_jobs
-                WHERE job_id = ?
-            ''', (job_id,))
-            return self._sync_job_from_row(cursor.fetchone())
-        finally:
-            conn.close()
+        return self.sync_jobs.get(job_id)
 
     def list_sync_jobs(self, limit=20, offset=0):
-        limit = self._normalize_positive_int(limit, 20, 100)
-        offset = self._normalize_positive_int(offset, 0, 100000)
-        conn = self._connect()
-        try:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT job_id, status, args_json, progress_json, result_json, error, created_at, updated_at, finished_at
-                FROM service_sync_jobs
-                ORDER BY updated_at DESC
-                LIMIT ?
-                OFFSET ?
-            ''', (limit, offset))
-            return [self._sync_job_from_row(row) for row in cursor.fetchall()]
-        finally:
-            conn.close()
+        return self.sync_jobs.list(limit, offset)
 
     def mark_running_sync_jobs_interrupted(self, timestamp=None):
-        timestamp = timestamp or self.get_current_time_info()['datetime']
-        conn = self._connect()
-        try:
-            cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE service_sync_jobs
-                SET status = ?, error = ?, updated_at = ?, finished_at = ?
-                WHERE status IN (?, ?)
-            ''', ('interrupted', '服务重启，后台同步任务已中断', timestamp, timestamp, 'running', 'cancelling'))
-            conn.commit()
-        finally:
-            conn.close()
-    
-    @staticmethod
-    def _ensure_column(cursor, table, column, column_type):
-        cursor.execute(f"PRAGMA table_info({table})")
-        columns = {row[1] for row in cursor.fetchall()}
-        if column not in columns:
-            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
-    
+        self.sync_jobs.mark_running_interrupted(timestamp)
+
     @staticmethod
     def _normalize_limit(limit):
         if limit is None:
@@ -458,14 +230,14 @@ class StockDataPool:
             raise ValueError('offset 必须在 0 到 1000000 之间')
         return offset
     
-    def fetch_kline_data(self, code, days=250):
+    def fetch_kline_data(self, code: str, days: int = 250) -> Optional[List[str]]:
         klines, api_name = self.api.fetch_kline(code, days)
         if klines:
             print(f"  [API: {api_name}] 获取K线成功")
             return klines
         return None
     
-    def fetch_stock_info(self, code):
+    def fetch_stock_info(self, code: str) -> Optional[Dict[str, str]]:
         realtime, api_name = self.api.fetch_realtime(code)
         if realtime:
             return {
@@ -474,13 +246,13 @@ class StockDataPool:
             }
         return None
     
-    def fetch_valuation_data(self, code):
+    def fetch_valuation_data(self, code: str) -> Optional[Dict[str, Any]]:
         realtime, api_name = self.api.fetch_realtime(code)
         if realtime:
             return realtime
         return None
     
-    def get_realtime_price(self, code):
+    def get_realtime_price(self, code: str) -> Dict[str, Any]:
         """直接从外部行情 API 获取实时价格，不读取或写入服务缓存。"""
         realtime, api_name = self.api.fetch_realtime(code)
         if not realtime:
@@ -501,7 +273,7 @@ class StockDataPool:
         })
         return realtime
     
-    def get_realtime_prices(self, codes, delay=0.2):
+    def get_realtime_prices(self, codes: List[str], delay: float = 0.2) -> List[Dict[str, Any]]:
         """批量直接从外部行情 API 获取实时价格，不读取或写入服务缓存。"""
         results = []
         for code in codes:
@@ -513,248 +285,54 @@ class StockDataPool:
     def fetch_fund_flow(self, code):
         return None
     
-    def save_stock_info(self, code, info):
+    def save_stock_info(self, code: str, info: Dict[str, str]) -> None:
         conn = self._connect()
-        cursor = conn.cursor()
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO stock_info 
-            (code, name, market, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (code, info.get('name', ''), info.get('market', ''), now, now))
-        
-        conn.commit()
-        conn.close()
+        try:
+            storage_save_stock_info(conn, code, info)
+        finally:
+            conn.close()
     
-    def save_daily_data(self, code, klines):
+    def save_daily_data(self, code: str, klines: List[str]) -> int:
         if not klines:
             return 0
         
         conn = self._connect()
         try:
-            cursor = conn.cursor()
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            count = 0
-            for kline in klines:
-                data_date = 'UNKNOWN'
-                try:
-                    parts = kline.split(',') if isinstance(kline, str) else list(kline)
-                    if len(parts) < 7:
-                        raise ValueError(f'字段不足: {kline}')
-                    data_date = parts[0]
-                    open_price = float(parts[1])
-                    close_price = float(parts[2])
-                    high = float(parts[3])
-                    low = float(parts[4])
-                    volume = float(parts[5])
-                    amount = float(parts[6])
-                    
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO stock_daily 
-                        (code, data_date, open, high, low, close, volume, amount, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (code, data_date, open_price, high, low, close_price, volume, amount, now))
-                    count += 1
-                except (TypeError, ValueError, sqlite3.Error) as e:
-                    print(f"  保存日K失败 {code} {data_date}: {e}")
-            
-            conn.commit()
-            return count
+            return storage_save_daily_data(conn, code, klines)
         finally:
             conn.close()
     
     @staticmethod
     def _ema(previous, value, period):
-        alpha = 2 / (period + 1)
-        return value if previous is None else value * alpha + previous * (1 - alpha)
+        return ema(previous, value, period)
     
     @staticmethod
-    def _rsi(values, period):
-        if len(values) <= period:
-            return None
-        gains, losses = [], []
-        for i in range(1, len(values)):
-            diff = values[i] - values[i - 1]
-            gains.append(max(diff, 0))
-            losses.append(max(-diff, 0))
-        recent_gains = gains[-period:]
-        recent_losses = losses[-period:]
-        avg_gain = sum(recent_gains) / period
-        avg_loss = sum(recent_losses) / period
-        if avg_loss == 0:
-            return 100.0
-        rs = avg_gain / avg_loss
-        return 100 - 100 / (1 + rs)
+    def _calculate_ma(values: List[float], window: int) -> List[Optional[float]]:
+        return calculate_ma(values, window)
+
+    @staticmethod
+    def _rsi(values: List[float], period: int) -> Optional[float]:
+        return rsi(values, period)
     
-    def calculate_technical(self, code):
+    def calculate_technical(self, code: str) -> None:
         conn = self._connect()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT data_date, close, high, low, volume 
-            FROM stock_daily 
-            WHERE code = ? 
-            ORDER BY data_date
-        ''', (code,))
-        
-        rows = cursor.fetchall()
-        
-        if not rows:
+        try:
+            rows = get_daily_data_for_technical(conn, code)
+            if not rows:
+                return
+
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            technical_items = calculate_technical_indicators(rows, now)
+            storage_save_technical_data(conn, code, technical_items)
+        finally:
             conn.close()
-            return
-        
-        closes = [float(r[1]) for r in rows]
-        highs = [float(r[2]) for r in rows]
-        lows = [float(r[3]) for r in rows]
-        volumes = [float(r[4] or 0) for r in rows]
-        dates = [r[0] for r in rows]
-        
-        first_close = closes[0] if closes else None
-        last_close = closes[-1] if closes else None
-        year_change = (last_close - first_close) / first_close * 100 if first_close and last_close else None
-        
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        ema12 = None
-        ema26 = None
-        dea = None
-        kdj_k = 50.0
-        kdj_d = 50.0
-        obv = 0.0
-        
-        for i, date in enumerate(dates):
-            close = closes[i]
-            high = highs[i]
-            low = lows[i]
-            
-            if i >= 4:
-                ma5 = sum(closes[max(0,i-4):i+1]) / min(5, i+1)
-            else:
-                ma5 = None
-            
-            if i >= 9:
-                ma10 = sum(closes[max(0,i-9):i+1]) / min(10, i+1)
-            else:
-                ma10 = None
-            
-            if i >= 19:
-                ma20 = sum(closes[max(0,i-19):i+1]) / min(20, i+1)
-            else:
-                ma20 = None
-            
-            if i >= 59:
-                ma60 = sum(closes[max(0,i-59):i+1]) / min(60, i+1)
-            else:
-                ma60 = None
-            
-            window_start_52w = max(0, i - 249)
-            high_52w = max(highs[window_start_52w:i+1])
-            low_52w = min(lows[window_start_52w:i+1])
-            position = (close - low_52w) / (high_52w - low_52w) * 100 if high_52w and low_52w and high_52w != low_52w else None
-            
-            ema12 = self._ema(ema12, close, 12)
-            ema26 = self._ema(ema26, close, 26)
-            dif = ema12 - ema26 if ema12 is not None and ema26 is not None else None
-            dea = self._ema(dea, dif, 9) if dif is not None else None
-            macd_hist = (dif - dea) * 2 if dif is not None and dea is not None else None
-            
-            rsi_6 = self._rsi(closes[:i+1], 6)
-            rsi_12 = self._rsi(closes[:i+1], 12)
-            rsi_24 = self._rsi(closes[:i+1], 24)
-            
-            kdj_start = max(0, i - 8)
-            period_high = max(highs[kdj_start:i+1])
-            period_low = min(lows[kdj_start:i+1])
-            rsv = (close - period_low) / (period_high - period_low) * 100 if period_high != period_low else 50
-            kdj_k = kdj_k * 2 / 3 + rsv / 3
-            kdj_d = kdj_d * 2 / 3 + kdj_k / 3
-            kdj_j = 3 * kdj_k - 2 * kdj_d
-            
-            boll_mid = ma20
-            if i >= 19:
-                boll_window = closes[i-19:i+1]
-                variance = sum((x - boll_mid) ** 2 for x in boll_window) / 20
-                boll_std = math.sqrt(variance)
-                boll_upper = boll_mid + 2 * boll_std
-                boll_lower = boll_mid - 2 * boll_std
-            else:
-                boll_upper = boll_lower = None
-            
-            tr_values = []
-            atr_start = max(0, i - 13)
-            for j in range(atr_start, i + 1):
-                prev_close = closes[j - 1] if j > 0 else closes[j]
-                tr_values.append(max(highs[j] - lows[j], abs(highs[j] - prev_close), abs(lows[j] - prev_close)))
-            atr = sum(tr_values) / len(tr_values) if len(tr_values) >= 14 else None
-            
-            if i > 0:
-                if close > closes[i - 1]:
-                    obv += volumes[i]
-                elif close < closes[i - 1]:
-                    obv -= volumes[i]
-            
-            try:
-                cursor.execute('''
-                    INSERT OR REPLACE INTO stock_technical 
-                    (code, data_date, ma5, ma10, ma20, ma60, ema12, ema26, macd, macd_signal, macd_hist,
-                     rsi_6, rsi_12, rsi_24, kdj_k, kdj_d, kdj_j, boll_upper, boll_mid, boll_lower,
-                     atr, obv, high_52w, low_52w, position_pct, year_change_pct, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (code, date, ma5, ma10, ma20, ma60, ema12, ema26, dif, dea, macd_hist,
-                      rsi_6, rsi_12, rsi_24, kdj_k, kdj_d, kdj_j, boll_upper, boll_mid, boll_lower,
-                      atr, obv, high_52w, low_52w, position, year_change, now))
-            except Exception as e:
-                print(f"  保存技术指标失败 {code} {date}: {e}")
-        
-        conn.commit()
-        conn.close()
     
     def check_data_freshness(self, code, data_type='daily', klt=None):
         conn = self._connect()
-        cursor = conn.cursor()
-        
-        if data_type == 'daily':
-            cursor.execute('''
-                SELECT MIN(data_date), MAX(data_date), COUNT(*) FROM stock_daily WHERE code = ?
-            ''', (code,))
-            result = cursor.fetchone()
-            if result and result[1]:
-                earliest_date = result[0]
-                latest_date = result[1]
-                row_count = result[2]
-                today = datetime.now().strftime('%Y-%m-%d')
-                conn.close()
-                return {
-                    'has_data': True,
-                    'earliest_date': earliest_date,
-                    'latest_date': latest_date,
-                    'row_count': row_count,
-                    'is_today': latest_date == today
-                }
-        
-        elif data_type == 'minute':
-            if klt is None:
-                cursor.execute('''
-                    SELECT MAX(data_time) FROM stock_minute WHERE code = ?
-                ''', (code,))
-            else:
-                cursor.execute('''
-                    SELECT MAX(data_time) FROM stock_minute WHERE code = ? AND klt = ?
-                ''', (code, klt))
-            result = cursor.fetchone()
-            if result and result[0]:
-                latest_time = result[0]
-                today = self.get_current_time_info()['date']
-                conn.close()
-                return {
-                    'has_data': True,
-                    'latest_time': latest_time,
-                    'is_today': latest_time.startswith(today)
-                }
-        
-        conn.close()
-        return {'has_data': False}
+        try:
+            return storage_check_data_freshness(conn, code, data_type, klt)
+        finally:
+            conn.close()
 
     @staticmethod
     def _calculate_daily_fetch_days(freshness, requested_days=250, force=False, today=None):
@@ -787,7 +365,7 @@ class StockDataPool:
 
         return min(requested_days, max(5, gap_days * 2 + 5))
     
-    def update_stock(self, code, days=250, delay=1.5, force=False):
+    def update_stock(self, code: str, days: int = 250, delay: float = 1.5, force: bool = False) -> None:
         print(f"更新 {code}...")
 
         freshness = self.check_data_freshness(code, 'daily')
@@ -820,26 +398,12 @@ class StockDataPool:
     
     def save_valuation_data(self, code, valuation):
         conn = self._connect()
-        cursor = conn.cursor()
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        today = datetime.now().strftime('%Y-%m-%d')
-        
-        import json
-        missing_fields_json = json.dumps(valuation.get('missing_fields', []), ensure_ascii=False)
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO stock_valuation 
-            (code, data_date, pe_ttm, pe_lyr, pb, market_cap, circ_market_cap, 
-             data_source, data_quality, missing_fields, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (code, today, valuation.get('pe_ttm'), valuation.get('pe_lyr'), 
-              valuation.get('pb'), valuation.get('market_cap'), valuation.get('circ_market_cap'),
-              valuation.get('data_source'), valuation.get('data_quality'), missing_fields_json, now))
-        
-        conn.commit()
-        conn.close()
+        try:
+            storage_save_valuation_data(conn, code, valuation)
+        finally:
+            conn.close()
     
-    def update_stocks(self, codes, days=250, delay=1.5):
+    def update_stocks(self, codes: List[str], days: int = 250, delay: float = 1.5) -> Dict[str, str]:
         results = {}
         for code in codes:
             try:
@@ -852,63 +416,19 @@ class StockDataPool:
     
     def get_stock_info(self, code):
         conn = self._connect()
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM stock_info WHERE code = ?', (code,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            return {
-                'code': row[0],
-                'name': row[1],
-                'market': row[2],
-                'sector': row[3],
-                'industry': row[4],
-            }
-        return None
+        try:
+            return storage_get_stock_info(conn, code)
+        finally:
+            conn.close()
     
     def get_daily_data(self, code, start_date=None, end_date=None, limit=None, offset=0, include_realtime=True):
         limit = self._normalize_limit(limit)
         offset = self._normalize_offset(offset)
         conn = self._connect()
-        cursor = conn.cursor()
-        
-        sql = 'SELECT * FROM stock_daily WHERE code = ?'
-        params = [code]
-        
-        if start_date:
-            sql += ' AND data_date >= ?'
-            params.append(start_date)
-        if end_date:
-            sql += ' AND data_date <= ?'
-            params.append(end_date)
-        
-        sql += ' ORDER BY data_date DESC'
-        
-        if limit:
-            sql += ' LIMIT ?'
-            params.append(limit)
-            if offset:
-                sql += ' OFFSET ?'
-                params.append(offset)
-        elif offset:
-            sql += ' LIMIT -1 OFFSET ?'
-            params.append(offset)
-        
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        conn.close()
-        
-        data = [{
-            'code': r[1],
-            'date': r[2],
-            'open': r[3],
-            'high': r[4],
-            'low': r[5],
-            'close': r[6],
-            'volume': r[7],
-            'amount': r[8],
-        } for r in rows]
+        try:
+            data = storage_get_daily_data(conn, code, start_date, end_date, limit, offset)
+        finally:
+            conn.close()
 
         if offset == 0 and include_realtime and self._request_includes_today(start_date, end_date):
             time_info = self.get_current_time_info()
@@ -933,110 +453,19 @@ class StockDataPool:
         limit = self._normalize_limit(limit)
         offset = self._normalize_offset(offset)
         conn = self._connect()
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        sql = 'SELECT * FROM stock_valuation WHERE code = ?'
-        params = [code]
-        
-        if start_date:
-            sql += ' AND data_date >= ?'
-            params.append(start_date)
-        if end_date:
-            sql += ' AND data_date <= ?'
-            params.append(end_date)
-        
-        sql += ' ORDER BY data_date DESC'
-
-        if limit:
-            sql += ' LIMIT ?'
-            params.append(limit)
-            if offset:
-                sql += ' OFFSET ?'
-                params.append(offset)
-        elif offset:
-            sql += ' LIMIT -1 OFFSET ?'
-            params.append(offset)
-        
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        conn.close()
-        
-        import json
-        return [{
-            'code': r['code'],
-            'date': r['data_date'],
-            'pe_ttm': r['pe_ttm'],
-            'pe_lyr': r['pe_lyr'],
-            'pb': r['pb'],
-            'ps_ttm': r['ps_ttm'],
-            'market_cap': r['market_cap'],
-            'circ_market_cap': r['circ_market_cap'],
-            'data_source': r['data_source'],
-            'data_quality': r['data_quality'],
-            'missing_fields': json.loads(r['missing_fields']) if r['missing_fields'] else [],
-        } for r in rows]
+        try:
+            return storage_get_valuation_data(conn, code, start_date, end_date, limit, offset)
+        finally:
+            conn.close()
     
     def get_technical_data(self, code, start_date=None, end_date=None, limit=None, offset=0):
         limit = self._normalize_limit(limit)
         offset = self._normalize_offset(offset)
         conn = self._connect()
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        sql = 'SELECT * FROM stock_technical WHERE code = ?'
-        params = [code]
-        
-        if start_date:
-            sql += ' AND data_date >= ?'
-            params.append(start_date)
-        if end_date:
-            sql += ' AND data_date <= ?'
-            params.append(end_date)
-        
-        sql += ' ORDER BY data_date DESC'
-        
-        if limit:
-            sql += ' LIMIT ?'
-            params.append(limit)
-            if offset:
-                sql += ' OFFSET ?'
-                params.append(offset)
-        elif offset:
-            sql += ' LIMIT -1 OFFSET ?'
-            params.append(offset)
-        
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        conn.close()
-        
-        return [{
-            'code': r['code'],
-            'date': r['data_date'],
-            'ma5': r['ma5'],
-            'ma10': r['ma10'],
-            'ma20': r['ma20'],
-            'ma60': r['ma60'],
-            'ema12': r['ema12'],
-            'ema26': r['ema26'],
-            'macd': r['macd'],
-            'macd_signal': r['macd_signal'],
-            'macd_hist': r['macd_hist'],
-            'rsi_6': r['rsi_6'],
-            'rsi_12': r['rsi_12'],
-            'rsi_24': r['rsi_24'],
-            'kdj_k': r['kdj_k'],
-            'kdj_d': r['kdj_d'],
-            'kdj_j': r['kdj_j'],
-            'boll_upper': r['boll_upper'],
-            'boll_mid': r['boll_mid'],
-            'boll_lower': r['boll_lower'],
-            'atr': r['atr'] if 'atr' in r.keys() else None,
-            'obv': r['obv'] if 'obv' in r.keys() else None,
-            'high_52w': r['high_52w'],
-            'low_52w': r['low_52w'],
-            'position_pct': r['position_pct'],
-        } for r in rows]
+        try:
+            return storage_get_technical_data(conn, code, start_date, end_date, limit, offset)
+        finally:
+            conn.close()
     
     @staticmethod
     def _chunked(items, size):
@@ -1470,28 +899,11 @@ class StockDataPool:
 
     @staticmethod
     def _minute_fetch_days_for_range(start_time=None, end_time=None, default=5):
-        if not start_time and not end_time:
-            return default
-        try:
-            start = datetime.strptime((start_time or end_time)[:10], '%Y-%m-%d').date()
-            today = datetime.now(SHANGHAI_TZ).date()
-        except (TypeError, ValueError):
-            return default
-        calendar_days = max(default, (today - start).days + 3)
-        return min(calendar_days, 120)
+        return minute_fetch_days_for_range(start_time, end_time, default)
 
     @staticmethod
     def _minute_kline_range(klines):
-        if not klines:
-            return None, None
-        times = []
-        for kline in klines:
-            parts = kline.split(',') if isinstance(kline, str) else list(kline)
-            if parts:
-                times.append(parts[0])
-        if not times:
-            return None, None
-        return min(times), max(times)
+        return minute_kline_range(klines)
     
     def save_minute_data(self, code, klines, klt=5):
         if not klines:
@@ -1499,35 +911,7 @@ class StockDataPool:
         
         conn = self._connect()
         try:
-            cursor = conn.cursor()
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            count = 0
-            for kline in klines:
-                data_time = 'UNKNOWN'
-                try:
-                    parts = kline.split(',') if isinstance(kline, str) else list(kline)
-                    if len(parts) < 7:
-                        raise ValueError(f'字段不足: {kline}')
-                    data_time = parts[0]
-                    open_price = float(parts[1])
-                    close_price = float(parts[2])
-                    high = float(parts[3])
-                    low = float(parts[4])
-                    volume = float(parts[5])
-                    amount = float(parts[6])
-                    
-                    cursor.execute('''
-                        INSERT OR REPLACE INTO stock_minute 
-                        (code, data_time, klt, open, high, low, close, volume, amount, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ''', (code, data_time, klt, open_price, high, low, close_price, volume, amount, now))
-                    count += 1
-                except (TypeError, ValueError, sqlite3.Error) as e:
-                    print(f"  保存分钟K失败 {code} {data_time}: {e}")
-            
-            conn.commit()
-            return count
+            return minute_save_minute_data(conn, code, klines, klt)
         finally:
             conn.close()
     
@@ -1628,88 +1012,21 @@ class StockDataPool:
         }
     
     def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0):
-        limit = self._normalize_limit(limit)
-        offset = self._normalize_offset(offset)
         conn = self._connect()
-        cursor = conn.cursor()
-        
-        sql = 'SELECT * FROM stock_minute WHERE code = ? AND klt = ?'
-        params = [code, klt]
-        
-        if start_time:
-            sql += ' AND data_time >= ?'
-            params.append(start_time)
-        if end_time:
-            sql += ' AND data_time <= ?'
-            params.append(end_time)
-        
-        sql += ' ORDER BY data_time DESC'
-        
-        if limit:
-            sql += ' LIMIT ?'
-            params.append(limit)
-            if offset:
-                sql += ' OFFSET ?'
-                params.append(offset)
-        elif offset:
-            sql += ' LIMIT -1 OFFSET ?'
-            params.append(offset)
-        
-        cursor.execute(sql, params)
-        rows = cursor.fetchall()
-        conn.close()
-        
-        return [{
-            'code': r[1],
-            'data_time': r[2],
-            'klt': r[3],
-            'open': r[4],
-            'high': r[5],
-            'low': r[6],
-            'close': r[7],
-            'volume': r[8],
-            'amount': r[9],
-        } for r in rows]
+        try:
+            return minute_get_minute_data(
+                conn, code, klt, start_time, end_time, limit, offset,
+                self._normalize_limit, self._normalize_offset
+            )
+        finally:
+            conn.close()
     
     @staticmethod
     def _seconds_until_intraday_data(time_context):
-        try:
-            now = datetime.fromisoformat(time_context['datetime'])
-        except (KeyError, TypeError, ValueError):
-            return None
-        target = now.replace(hour=9, minute=35, second=0, microsecond=0)
-        return max(0, int((target - now).total_seconds()))
+        return seconds_until_intraday_data(time_context)
 
     def _intraday_resolution(self, code, date, time_context, required_calls, reason):
-        action_required = 'call_tools'
-        wait_seconds = 0
-        if date > time_context['date']:
-            action_required = 'wait'
-            wait_seconds = None
-            required_calls = []
-            reason = '请求日期晚于当前日期，外部行情尚不可用'
-        elif date == time_context['date'] and time_context['trading_session'] == 'pre_market':
-            action_required = 'wait'
-            wait_seconds = self._seconds_until_intraday_data(time_context)
-            required_calls = []
-            reason = '当前尚未产生当日5分钟分时数据'
-        elif date == time_context['date'] and not time_context['is_trading_day']:
-            action_required = 'no_data_expected'
-            wait_seconds = None
-            required_calls = []
-            reason = '请求日期不是A股交易日，通常不会产生分时数据'
-
-        return {
-            'action_required': action_required,
-            'reason': reason,
-            'wait_seconds': wait_seconds,
-            'required_calls': required_calls,
-            'retry_after': 'after_required_calls_complete' if action_required == 'call_tools' else 'after_wait',
-            'retry_call': {
-                'tool': 'analyze_intraday',
-                'arguments': {'code': code, 'date': date},
-            },
-        }
+        return intraday_resolution(code, date, time_context, required_calls, reason, seconds_until_intraday_data)
 
     def analyze_intraday(self, code, date=None):
         time_context = self.get_current_time_info()
