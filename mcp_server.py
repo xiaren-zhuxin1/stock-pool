@@ -495,21 +495,23 @@ TOOLS = [
     },
     {
         "name": "update_minute_data",
-        "description": "更新单只股票分钟K线。",
+        "description": "更新单只股票分钟K线；可带 start_time/end_time 检查目标区间是否可用。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码，如 603993"},
                 "klt": {"type": "integer", "description": "1/5/15/30/60分钟", "default": 5},
                 "days": {"type": "integer", "description": "天数，默认5", "default": 5},
-                "force": {"type": "boolean", "description": "强制刷新", "default": False}
+                "force": {"type": "boolean", "description": "强制刷新", "default": False},
+                "start_time": {"type": "string", "description": "目标开始时间"},
+                "end_time": {"type": "string", "description": "目标结束时间"}
             },
             "required": ["code"]
         }
     },
     {
         "name": "get_minute_data",
-        "description": "分页查询分钟K线。空结果先调用 update_minute_data。",
+        "description": "分页查询分钟K线。空结果按 resolution 调用 update_minute_data 或停止重试。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -525,7 +527,7 @@ TOOLS = [
     },
     {
         "name": "analyze_intraday",
-        "description": "分析单只股票日内走势。依赖日K、技术指标和分钟K线。",
+        "description": "分析单只股票日内走势；先调用 get_current_time。失败时按 resolution 调用工具或等待，不要改用其他日期。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -675,8 +677,10 @@ def _handle_tool_call(name, arguments):
             klt = arguments.get("klt", 5)
             days = arguments.get("days", 5)
             force = arguments.get("force", False)
-            pool.update_minute_data(code, klt, days, force=force)
-            return {"success": True, "message": f"已更新 {code} {klt}分钟K线"}
+            start_time = arguments.get("start_time")
+            end_time = arguments.get("end_time")
+            result = pool.update_minute_data(code, klt, days, force=force, start_time=start_time, end_time=end_time)
+            return result
         
         elif name == "get_minute_data":
             code = arguments.get("code")
@@ -686,7 +690,39 @@ def _handle_tool_call(name, arguments):
             limit = arguments.get("limit")
             offset = arguments.get("offset", 0)
             data = pool.get_minute_data(code, klt, start_time, end_time, limit, offset)
-            return {"success": True, "data": data}
+            response = {"success": True, "data": data}
+            if not data and (start_time or end_time):
+                response.update({
+                    "message": "未查询到目标区间分钟K线",
+                    "resolution": {
+                        "action_required": "call_tools",
+                        "reason": "本地没有目标区间数据；先按原时间范围更新，再重试本查询",
+                        "required_calls": [{
+                            "tool": "update_minute_data",
+                            "arguments": {
+                                "code": code,
+                                "klt": klt,
+                                "days": 5,
+                                "force": True,
+                                "start_time": start_time,
+                                "end_time": end_time,
+                            },
+                        }],
+                        "retry_after": "after_required_calls_complete",
+                        "retry_call": {
+                            "tool": "get_minute_data",
+                            "arguments": {
+                                "code": code,
+                                "klt": klt,
+                                "start_time": start_time,
+                                "end_time": end_time,
+                                "limit": limit,
+                                "offset": offset,
+                            },
+                        },
+                    },
+                })
+            return response
         
         elif name == "analyze_intraday":
             code = arguments.get("code")

@@ -1464,6 +1464,31 @@ class StockDataPool:
             print(f"  [API: {api_name}] 获取{klt}分钟K线成功")
             return klines
         return None
+
+    @staticmethod
+    def _minute_fetch_days_for_range(start_time=None, end_time=None, default=5):
+        if not start_time and not end_time:
+            return default
+        try:
+            start = datetime.strptime((start_time or end_time)[:10], '%Y-%m-%d').date()
+            today = datetime.now(SHANGHAI_TZ).date()
+        except (TypeError, ValueError):
+            return default
+        calendar_days = max(default, (today - start).days + 3)
+        return min(calendar_days, 120)
+
+    @staticmethod
+    def _minute_kline_range(klines):
+        if not klines:
+            return None, None
+        times = []
+        for kline in klines:
+            parts = kline.split(',') if isinstance(kline, str) else list(kline)
+            if parts:
+                times.append(parts[0])
+        if not times:
+            return None, None
+        return min(times), max(times)
     
     def save_minute_data(self, code, klines, klt=5):
         if not klines:
@@ -1503,10 +1528,18 @@ class StockDataPool:
         finally:
             conn.close()
     
-    def update_minute_data(self, code, klt=5, days=5, delay=1.5, force=False):
+    def update_minute_data(self, code, klt=5, days=5, delay=1.5, force=False, start_time=None, end_time=None):
         print(f"更新 {code} {klt}分钟K线...")
+
+        requested_range = None
+        if start_time or end_time:
+            requested_range = {
+                'start_time': start_time,
+                'end_time': end_time,
+            }
+            days = max(days, self._minute_fetch_days_for_range(start_time, end_time, days))
         
-        if not force:
+        if not force and not requested_range:
             freshness = self.check_data_freshness(code, 'minute', klt=klt)
             if freshness['has_data']:
                 latest_time_str = freshness['latest_time']
@@ -1527,14 +1560,69 @@ class StockDataPool:
 
                     if minutes_diff < klt:
                         print(f"  数据已是最新（{latest_time_str}），跳过更新")
-                        return
+                        return {
+                            'success': True,
+                            'updated': False,
+                            'reason': 'local_data_fresh',
+                            'latest_time': latest_time_str,
+                        }
 
         klines = self.fetch_minute_data(code, klt, days)
+        fetched_start, fetched_end = self._minute_kline_range(klines)
         if klines:
             count = self.save_minute_data(code, klines, klt)
             print(f"  保存: {count} 条")
+        else:
+            count = 0
         
         time.sleep(delay)
+
+        target_count = None
+        target_covered = None
+        resolution = None
+        if requested_range:
+            target_count = len(self.get_minute_data(code, klt, start_time, end_time))
+            target_covered = target_count > 0
+            if not target_covered:
+                action_required = 'retry_later_or_use_daily_data'
+                reason = '外部分时接口更新后仍未返回请求区间数据'
+                if fetched_start and end_time and end_time < fetched_start:
+                    action_required = 'unavailable_from_provider'
+                    reason = f'外部分时接口当前最早只返回到 {fetched_start}，请求区间早于可用范围'
+                elif fetched_end and start_time and start_time > fetched_end:
+                    action_required = 'wait'
+                    reason = f'外部分时接口当前最新只返回到 {fetched_end}，请求区间尚未可用'
+                resolution = {
+                    'action_required': action_required,
+                    'reason': reason,
+                    'retry_call': {
+                        'tool': 'get_minute_data',
+                        'arguments': {
+                            'code': code,
+                            'klt': klt,
+                            'start_time': start_time,
+                            'end_time': end_time,
+                        },
+                    } if action_required != 'unavailable_from_provider' else None,
+                    'do_not_retry_update': action_required == 'unavailable_from_provider',
+                }
+
+        return {
+            'success': bool(klines) and (target_covered is not False),
+            'updated': bool(klines),
+            'code': code,
+            'klt': klt,
+            'days': days,
+            'saved_count': count,
+            'fetched_range': {
+                'start_time': fetched_start,
+                'end_time': fetched_end,
+            },
+            'requested_range': requested_range,
+            'target_count': target_count,
+            'target_covered': target_covered,
+            'resolution': resolution,
+        }
     
     def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0):
         limit = self._normalize_limit(limit)
@@ -1580,18 +1668,100 @@ class StockDataPool:
             'amount': r[9],
         } for r in rows]
     
+    @staticmethod
+    def _seconds_until_intraday_data(time_context):
+        try:
+            now = datetime.fromisoformat(time_context['datetime'])
+        except (KeyError, TypeError, ValueError):
+            return None
+        target = now.replace(hour=9, minute=35, second=0, microsecond=0)
+        return max(0, int((target - now).total_seconds()))
+
+    def _intraday_resolution(self, code, date, time_context, required_calls, reason):
+        action_required = 'call_tools'
+        wait_seconds = 0
+        if date > time_context['date']:
+            action_required = 'wait'
+            wait_seconds = None
+            required_calls = []
+            reason = '请求日期晚于当前日期，外部行情尚不可用'
+        elif date == time_context['date'] and time_context['trading_session'] == 'pre_market':
+            action_required = 'wait'
+            wait_seconds = self._seconds_until_intraday_data(time_context)
+            required_calls = []
+            reason = '当前尚未产生当日5分钟分时数据'
+        elif date == time_context['date'] and not time_context['is_trading_day']:
+            action_required = 'no_data_expected'
+            wait_seconds = None
+            required_calls = []
+            reason = '请求日期不是A股交易日，通常不会产生分时数据'
+
+        return {
+            'action_required': action_required,
+            'reason': reason,
+            'wait_seconds': wait_seconds,
+            'required_calls': required_calls,
+            'retry_after': 'after_required_calls_complete' if action_required == 'call_tools' else 'after_wait',
+            'retry_call': {
+                'tool': 'analyze_intraday',
+                'arguments': {'code': code, 'date': date},
+            },
+        }
+
     def analyze_intraday(self, code, date=None):
+        time_context = self.get_current_time_info()
         if not date:
-            date = datetime.now().strftime('%Y-%m-%d')
+            date = time_context['date']
         
         data_5min = self.get_minute_data(code, klt=5, start_time=f'{date} 09:30', end_time=f'{date} 15:00')
         daily_data = self.get_daily_data(code, limit=2)
         technical_data = self.get_technical_data(code, start_date=date)
         
         if not data_5min:
-            return {'success': False, 'message': '未获取到分时数据'}
+            minute_freshness = self.check_data_freshness(code, 'minute', klt=5)
+            daily_freshness = self.check_data_freshness(code, 'daily')
+            return {
+                'success': False,
+                'status': 'missing_minute_data',
+                'code': code,
+                'requested_date': date,
+                'current_date': time_context['date'],
+                'message': f'未获取到 {date} 的5分钟分时数据',
+                'latest_minute_time': minute_freshness.get('latest_time'),
+                'latest_daily_date': daily_freshness.get('latest_date'),
+                'next_actions': ['update_minute_data', 'update_stock'],
+                'resolution': self._intraday_resolution(code, date, time_context, [
+                    {
+                        'tool': 'update_minute_data',
+                        'arguments': {
+                            'code': code,
+                            'klt': 5,
+                            'days': 2,
+                            'force': True,
+                            'start_time': f'{date} 09:30',
+                            'end_time': f'{date} 15:00',
+                        },
+                    },
+                    {'tool': 'update_stock', 'arguments': {'code': code, 'days': 10, 'force': True}},
+                ], '本地缺少请求日期的5分钟分时数据'),
+                'do_not_analyze_other_date': True,
+            }
         if not daily_data:
-            return {'success': False, 'message': '未获取到日K数据'}
+            daily_freshness = self.check_data_freshness(code, 'daily')
+            return {
+                'success': False,
+                'status': 'missing_daily_data',
+                'code': code,
+                'requested_date': date,
+                'current_date': time_context['date'],
+                'message': f'未获取到 {date} 可用的日K数据',
+                'latest_daily_date': daily_freshness.get('latest_date'),
+                'next_actions': ['update_stock'],
+                'resolution': self._intraday_resolution(code, date, time_context, [
+                    {'tool': 'update_stock', 'arguments': {'code': code, 'days': 10, 'force': True}},
+                ], '本地缺少请求日期可用的日K数据'),
+                'do_not_analyze_other_date': True,
+            }
         
         data_5min.reverse()
         
@@ -1599,7 +1769,29 @@ class StockDataPool:
         afternoon_data = [d for d in data_5min if '13:' in d['data_time'] or '14:' in d['data_time'] or '15:' in d['data_time']]
         
         if not morning_data:
-            return {'success': False, 'message': '未获取到上午数据'}
+            return {
+                'success': False,
+                'status': 'missing_morning_data',
+                'code': code,
+                'requested_date': date,
+                'current_date': time_context['date'],
+                'message': f'未获取到 {date} 的上午分时数据',
+                'next_actions': ['update_minute_data'],
+                'resolution': self._intraday_resolution(code, date, time_context, [
+                    {
+                        'tool': 'update_minute_data',
+                        'arguments': {
+                            'code': code,
+                            'klt': 5,
+                            'days': 2,
+                            'force': True,
+                            'start_time': f'{date} 09:30',
+                            'end_time': f'{date} 15:00',
+                        },
+                    },
+                ], '本地缺少请求日期的上午分时数据'),
+                'do_not_analyze_other_date': True,
+            }
         
         open_price = morning_data[0]['open']
         prev_close = daily_data[1]['close'] if len(daily_data) > 1 else daily_data[0]['close']
@@ -1670,6 +1862,7 @@ class StockDataPool:
             'success': True,
             'code': code,
             'date': date,
+            'current_date': time_context['date'],
             'morning_review': {
                 'open_price': round(open_price, 2),
                 'prev_close': round(prev_close, 2),

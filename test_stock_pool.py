@@ -841,11 +841,48 @@ class TestStockDataPool(unittest.TestCase):
 
         print("  历史分钟数据不会阻止拉取，不同klt互不干扰")
 
+    def test_update_minute_reports_requested_range_not_available(self):
+        print("\n[测试] 分钟K线目标区间不可用时返回明确原因")
+        pool = StockDataPool(':memory:')
+
+        class FakeAPI:
+            def fetch_minute_kline(self, code, klt, days):
+                return [
+                    '2026-03-20 09:35,10,10,10,10,1,10',
+                    '2026-05-08 15:00,11,11,11,11,1,11',
+                ], 'fake'
+
+        pool.api = FakeAPI()
+        result = pool.update_minute_data(
+            '603993',
+            klt=5,
+            days=5,
+            delay=0,
+            force=True,
+            start_time='2026-03-10 09:30',
+            end_time='2026-03-10 15:00',
+        )
+
+        self.assertFalse(result['success'])
+        self.assertFalse(result['target_covered'])
+        self.assertEqual(result['fetched_range']['start_time'], '2026-03-20 09:35')
+        self.assertEqual(result['resolution']['action_required'], 'unavailable_from_provider')
+        self.assertTrue(result['resolution']['do_not_retry_update'])
+
+        print("  已识别外部分时接口范围不覆盖目标日期")
+
     def test_analyze_intraday_edge_cases(self):
         print("\n[测试] 日内分析边界场景")
         empty_pool = StockDataPool(':memory:')
         empty_result = empty_pool.analyze_intraday('000001', '2024-01-01')
         self.assertFalse(empty_result['success'])
+        self.assertEqual(empty_result['requested_date'], '2024-01-01')
+        self.assertTrue(empty_result['do_not_analyze_other_date'])
+        self.assertIn('update_minute_data', empty_result['next_actions'])
+        self.assertEqual(empty_result['resolution']['action_required'], 'call_tools')
+        self.assertEqual(empty_result['resolution']['wait_seconds'], 0)
+        self.assertEqual(empty_result['resolution']['required_calls'][0]['tool'], 'update_minute_data')
+        self.assertEqual(empty_result['resolution']['retry_call']['arguments']['date'], '2024-01-01')
 
         pool = StockDataPool(':memory:')
         pool.save_daily_data('000001', ['2024-01-01,10,10,10,10,0,0'])
