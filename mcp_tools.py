@@ -303,5 +303,46 @@ TOOLS = [
             },
             "required": ["code"]
         }
+    },
+    {
+        "name": "update_fund_flow",
+        "description": "更新单只股票资金流向数据。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "股票代码，如 601138"},
+                "days": {"type": "integer", "description": "天数，默认100", "default": 100},
+                "delay": {"type": "number", "description": "请求间隔秒，默认1.5", "default": 1.5},
+                "force": {"type": "boolean", "description": "强制刷新", "default": False}
+            },
+            "required": ["code"]
+        }
+    },
+    {
+        "name": "get_fund_flow",
+        "description": "分页查询资金流向数据。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "股票代码"},
+                "start_date": {"type": "string", "description": "开始日期，如 2025-01-01"},
+                "end_date": {"type": "string", "description": "结束日期，如 2026-05-06"},
+                "limit": {"type": "integer", "description": "条数上限"},
+                "offset": {"type": "integer", "description": "分页偏移", "default": 0}
+            },
+            "required": ["code"]
+        }
+    },
+    {
+        "name": "analyze_main_force",
+        "description": "分析主力资金动向，包括净流入、连续流入/流出天数、趋势强度等。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "股票代码，如 601138"},
+                "days": {"type": "integer", "description": "分析天数，默认10", "default": 10}
+            },
+            "required": ["code"]
+        }
     }
 ]

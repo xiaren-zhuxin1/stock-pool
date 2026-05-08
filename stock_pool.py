@@ -29,10 +29,12 @@ try:
         save_daily_data as storage_save_daily_data,
         save_valuation_data as storage_save_valuation_data,
         save_technical_data as storage_save_technical_data,
+        save_fund_flow_data as storage_save_fund_flow_data,
         get_stock_info as storage_get_stock_info,
         get_daily_data as storage_get_daily_data,
         get_valuation_data as storage_get_valuation_data,
         get_technical_data as storage_get_technical_data,
+        get_fund_flow_data as storage_get_fund_flow_data,
         get_daily_data_for_technical,
         check_data_freshness as storage_check_data_freshness,
     )
@@ -54,10 +56,12 @@ except ImportError:
         save_daily_data as storage_save_daily_data,
         save_valuation_data as storage_save_valuation_data,
         save_technical_data as storage_save_technical_data,
+        save_fund_flow_data as storage_save_fund_flow_data,
         get_stock_info as storage_get_stock_info,
         get_daily_data as storage_get_daily_data,
         get_valuation_data as storage_get_valuation_data,
         get_technical_data as storage_get_technical_data,
+        get_fund_flow_data as storage_get_fund_flow_data,
         get_daily_data_for_technical,
         check_data_freshness as storage_check_data_freshness,
     )
@@ -282,8 +286,105 @@ class StockDataPool:
                 time.sleep(delay)
         return results
     
-    def fetch_fund_flow(self, code):
-        return None
+    def fetch_fund_flow(self, code, days=100):
+        fund_flow_items, api_name = self.api.fetch_fund_flow_history(code, days)
+        return fund_flow_items
+    
+    def save_fund_flow_data(self, code, fund_flow_items):
+        if not fund_flow_items:
+            return 0
+        
+        conn = self._connect()
+        try:
+            saved = storage_save_fund_flow_data(conn, code, fund_flow_items)
+            print(f"  保存资金流向: {saved} 条")
+            return saved
+        finally:
+            conn.close()
+    
+    def update_fund_flow(self, code, days=100, delay=1.5, force=False):
+        freshness = self.check_data_freshness(code, 'fund_flow')
+        
+        if not force and freshness.get('has_data'):
+            latest_date = freshness.get('latest_date')
+            today = datetime.now().strftime('%Y-%m-%d')
+            if latest_date == today:
+                print(f"  资金流向数据已是最新（{latest_date}），跳过更新")
+                return
+        
+        print(f"更新 {code} 资金流向...")
+        fund_flow_items = self.fetch_fund_flow(code, days)
+        
+        if fund_flow_items:
+            self.save_fund_flow_data(code, fund_flow_items)
+        
+        if delay:
+            time.sleep(delay)
+    
+    def get_fund_flow(self, code, start_date=None, end_date=None, limit=None, offset=0):
+        conn = self._connect()
+        try:
+            return storage_get_fund_flow_data(conn, code, start_date, end_date, limit, offset)
+        finally:
+            conn.close()
+    
+    def analyze_main_force(self, code, days=10):
+        fund_flow_data = self.get_fund_flow(code, limit=days)
+        
+        if not fund_flow_data:
+            return {
+                'code': code,
+                'success': False,
+                'error': '无资金流向数据'
+            }
+        
+        main_inflows = [item['main_net_inflow'] for item in fund_flow_data if item.get('main_net_inflow')]
+        main_inflow_pcts = [item['main_net_inflow_pct'] for item in fund_flow_data if item.get('main_net_inflow_pct')]
+        
+        if not main_inflows:
+            return {
+                'code': code,
+                'success': False,
+                'error': '无有效主力资金数据'
+            }
+        
+        total_main_inflow = sum(main_inflows)
+        avg_main_inflow = total_main_inflow / len(main_inflows)
+        avg_main_inflow_pct = sum(main_inflow_pcts) / len(main_inflow_pcts) if main_inflow_pcts else 0
+        
+        positive_days = sum(1 for inflow in main_inflows if inflow > 0)
+        negative_days = len(main_inflows) - positive_days
+        
+        consecutive_inflow = 0
+        consecutive_outflow = 0
+        current_streak = 0
+        for inflow in main_inflows:
+            if inflow > 0:
+                current_streak = current_streak + 1 if current_streak > 0 else 1
+                consecutive_inflow = max(consecutive_inflow, current_streak)
+            else:
+                current_streak = current_streak - 1 if current_streak < 0 else -1
+                consecutive_outflow = max(consecutive_outflow, abs(current_streak))
+        
+        latest = fund_flow_data[0] if fund_flow_data else None
+        
+        return {
+            'code': code,
+            'success': True,
+            'days': len(main_inflows),
+            'total_main_inflow': total_main_inflow,
+            'avg_main_inflow': avg_main_inflow,
+            'avg_main_inflow_pct': avg_main_inflow_pct,
+            'positive_days': positive_days,
+            'negative_days': negative_days,
+            'consecutive_inflow': consecutive_inflow,
+            'consecutive_outflow': consecutive_outflow,
+            'latest_date': latest.get('data_date') if latest else None,
+            'latest_main_inflow': latest.get('main_net_inflow') if latest else None,
+            'latest_main_inflow_pct': latest.get('main_net_inflow_pct') if latest else None,
+            'trend': 'inflow' if total_main_inflow > 0 else 'outflow',
+            'strength': 'strong' if abs(avg_main_inflow_pct) > 5 else 'medium' if abs(avg_main_inflow_pct) > 2 else 'weak'
+        }
     
     def save_stock_info(self, code: str, info: Dict[str, str]) -> None:
         conn = self._connect()

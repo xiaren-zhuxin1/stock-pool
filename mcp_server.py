@@ -262,6 +262,32 @@ def _handle_analyze_intraday(arguments):
     date = arguments.get("date")
     return pool.analyze_intraday(code, date)
 
+def _handle_update_fund_flow(arguments):
+    code = arguments.get("code")
+    days = arguments.get("days", 100)
+    delay = arguments.get("delay", 1.5)
+    force = arguments.get("force", False)
+    try:
+        pool.update_fund_flow(code, days, delay, force)
+        return {"success": True, "code": code}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def _handle_get_fund_flow(arguments):
+    code = arguments.get("code")
+    start_date = arguments.get("start_date")
+    end_date = arguments.get("end_date")
+    limit = arguments.get("limit")
+    offset = arguments.get("offset", 0)
+    data = pool.get_fund_flow(code, start_date, end_date, limit, offset)
+    return {"success": True, "data": data}
+
+def _handle_analyze_main_force(arguments):
+    code = arguments.get("code")
+    days = arguments.get("days", 10)
+    result = pool.analyze_main_force(code, days)
+    return result
+
 def _handle_legacy_stats(arguments):
     return {"success": False, "error": "该统计入口不可用。筛选用 screen_market。"}
 
@@ -287,6 +313,9 @@ TOOL_HANDLERS = {
     "update_minute_data": _handle_update_minute_data,
     "get_minute_data": _handle_get_minute_data,
     "analyze_intraday": _handle_analyze_intraday,
+    "update_fund_flow": _handle_update_fund_flow,
+    "get_fund_flow": _handle_get_fund_flow,
+    "analyze_main_force": _handle_analyze_main_force,
 }
 
 for tool_name in LEGACY_STATS_TOOLS:

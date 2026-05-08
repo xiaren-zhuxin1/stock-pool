@@ -527,4 +527,166 @@ def check_data_freshness(conn: sqlite3.Connection, code: str, data_type: str = '
                 'is_today': latest_time.startswith(today)
             }
     
+    elif data_type == 'fund_flow':
+        cursor.execute('''
+            SELECT MIN(data_date), MAX(data_date), COUNT(*) FROM stock_fund_flow WHERE code = ?
+        ''', (code,))
+        result = cursor.fetchone()
+        if result and result[1]:
+            earliest_date = result[0]
+            latest_date = result[1]
+            row_count = result[2]
+            today = datetime.now().strftime('%Y-%m-%d')
+            return {
+                'has_data': True,
+                'earliest_date': earliest_date,
+                'latest_date': latest_date,
+                'row_count': row_count,
+                'is_today': latest_date == today
+            }
+    
     return {'has_data': False}
+
+
+def save_fund_flow_data(conn: sqlite3.Connection, code: str, fund_flow_items: List[str]) -> int:
+    cursor = conn.cursor()
+    saved_count = 0
+    
+    for item in fund_flow_items:
+        try:
+            parts = item.split(',')
+            if len(parts) < 13:
+                continue
+            
+            data_date = parts[0]
+            main_net_inflow = float(parts[1]) if parts[1] and parts[1] != '-' else None
+            small_net_inflow = float(parts[2]) if parts[2] and parts[2] != '-' else None
+            mid_net_inflow = float(parts[3]) if parts[3] and parts[3] != '-' else None
+            big_net_inflow = float(parts[4]) if parts[4] and parts[4] != '-' else None
+            super_net_inflow = float(parts[5]) if parts[5] and parts[5] != '-' else None
+            main_net_inflow_pct = float(parts[6]) if parts[6] and parts[6] != '-' else None
+            small_net_inflow_pct = float(parts[7]) if parts[7] and parts[7] != '-' else None
+            mid_net_inflow_pct = float(parts[8]) if parts[8] and parts[8] != '-' else None
+            big_net_inflow_pct = float(parts[9]) if parts[9] and parts[9] != '-' else None
+            super_net_inflow_pct = float(parts[10]) if parts[10] and parts[10] != '-' else None
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO stock_fund_flow 
+                (code, data_date, main_net_inflow, main_net_inflow_pct, 
+                 super_net_inflow, big_net_inflow, mid_net_inflow, small_net_inflow,
+                 created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                code, data_date, main_net_inflow, main_net_inflow_pct,
+                super_net_inflow, big_net_inflow, mid_net_inflow, small_net_inflow,
+                datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            ))
+            saved_count += 1
+        except Exception as e:
+            print(f"保存资金流向数据失败 {code} {item}: {e}")
+            continue
+    
+    conn.commit()
+    return saved_count
+
+
+def get_fund_flow_data(
+    conn: sqlite3.Connection,
+    code: str,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0
+) -> List[Dict[str, Any]]:
+    cursor = conn.cursor()
+    
+    query = '''
+        SELECT 
+            code, data_date, main_net_inflow, main_net_inflow_pct,
+            super_net_inflow, big_net_inflow, mid_net_inflow, small_net_inflow,
+            created_at
+        FROM stock_fund_flow
+        WHERE code = ?
+    '''
+    params = [code]
+    
+    if start_date:
+        query += ' AND data_date >= ?'
+        params.append(start_date)
+    
+    if end_date:
+        query += ' AND data_date <= ?'
+        params.append(end_date)
+    
+    query += ' ORDER BY data_date DESC'
+    
+    if limit:
+        query += f' LIMIT {limit} OFFSET {offset}'
+    
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    
+    results = []
+    for row in rows:
+        results.append({
+            'code': row[0],
+            'data_date': row[1],
+            'main_net_inflow': row[2],
+            'main_net_inflow_pct': row[3],
+            'super_net_inflow': row[4],
+            'big_net_inflow': row[5],
+            'mid_net_inflow': row[6],
+            'small_net_inflow': row[7],
+            'created_at': row[8]
+        })
+    
+    return results
+
+
+def get_latest_fund_flow(conn: sqlite3.Connection, codes: List[str]) -> List[Dict[str, Any]]:
+    if not codes:
+        return []
+    
+    cursor = conn.cursor()
+    placeholders = ','.join('?' * len(codes))
+    
+    query = f'''
+        SELECT 
+            s.code,
+            s.name,
+            f.data_date,
+            f.main_net_inflow,
+            f.main_net_inflow_pct,
+            f.super_net_inflow,
+            f.big_net_inflow,
+            f.mid_net_inflow,
+            f.small_net_inflow
+        FROM stock_fund_flow f
+        INNER JOIN (
+            SELECT code, MAX(data_date) as max_date
+            FROM stock_fund_flow
+            WHERE code IN ({placeholders})
+            GROUP BY code
+        ) latest ON f.code = latest.code AND f.data_date = latest.max_date
+        LEFT JOIN stock_info s ON f.code = s.code
+        WHERE f.code IN ({placeholders})
+    '''
+    
+    cursor.execute(query, codes + codes)
+    rows = cursor.fetchall()
+    
+    results = []
+    for row in rows:
+        results.append({
+            'code': row[0],
+            'name': row[1],
+            'data_date': row[2],
+            'main_net_inflow': row[3],
+            'main_net_inflow_pct': row[4],
+            'super_net_inflow': row[5],
+            'big_net_inflow': row[6],
+            'mid_net_inflow': row[7],
+            'small_net_inflow': row[8]
+        })
+    
+    return results

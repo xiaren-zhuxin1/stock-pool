@@ -629,6 +629,122 @@ class StockAPIProvider:
                 return result, 'eastmoney'
         return None, None
     
+    def fetch_fund_flow_history_eastmoney(self, code, days=100):
+        try:
+            market = '1' if code.startswith('6') else '0'
+            url = "http://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get"
+            params = {
+                'lmt': str(days),
+                'klt': '101',
+                'secid': f"{market}.{code}",
+                'fields1': 'f1,f2,f3,f7',
+                'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63'
+            }
+            
+            response = self._request_with_retry(
+                url,
+                params=params,
+                headers=self._get_headers('http://quote.eastmoney.com/')
+            )
+            
+            if response:
+                data = response.json()
+                if data and 'data' in data and data['data'] and 'klines' in data['data']:
+                    self._mark_api_success('eastmoney')
+                    return data['data']['klines']
+        except Exception as e:
+            self._mark_api_error('eastmoney', e)
+        return None
+    
+    def fetch_fund_flow_intraday_eastmoney(self, code, klt=1):
+        try:
+            market = '1' if code.startswith('6') else '0'
+            url = "http://push2.eastmoney.com/api/qt/stock/fflow/kline/get"
+            params = {
+                'lmt': '0',
+                'klt': str(klt),
+                'secid': f"{market}.{code}",
+                'fields1': 'f1,f2,f3,f7',
+                'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63'
+            }
+            
+            response = self._request_with_retry(
+                url,
+                params=params,
+                headers=self._get_headers('http://quote.eastmoney.com/')
+            )
+            
+            if response:
+                data = response.json()
+                if data and 'data' in data and data['data'] and 'klines' in data['data']:
+                    self._mark_api_success('eastmoney')
+                    return data['data']['klines']
+        except Exception as e:
+            self._mark_api_error('eastmoney', e)
+        return None
+    
+    def fetch_fund_flow_ranking_eastmoney(self, board='a_share', sort_by='f62', sort_order='desc', limit=50):
+        try:
+            url = "http://push2.eastmoney.com/api/qt/clist/get"
+            
+            board_map = {
+                'a_share': 'm:0+t:6,m:0+t:13,m:0+t:80,m:1+t:2,m:1+t:23',
+                'main': 'm:1+t:2,m:1+t:23',
+                'gem': 'm:0+t:80',
+                'star': 'm:1+t:23',
+            }
+            
+            fs = board_map.get(board, board_map['a_share'])
+            
+            params = {
+                'fid': sort_by,
+                'po': '1' if sort_order == 'asc' else '0',
+                'pz': str(limit),
+                'pn': '1',
+                'np': '1',
+                'fltt': '2',
+                'invt': '2',
+                'ut': 'b2884a393a59ad64002292a3e90d46a5',
+                'fs': fs,
+                'fields': 'f12,f14,f2,f3,f62,f184,f66,f69,f72,f75,f78,f81,f84,f87'
+            }
+            
+            response = self._request_with_retry(
+                url,
+                params=params,
+                headers=self._get_headers('http://quote.eastmoney.com/')
+            )
+            
+            if response:
+                data = response.json()
+                if data and 'data' in data and data['data'] and 'diff' in data['data']:
+                    self._mark_api_success('eastmoney')
+                    return data['data']['diff']
+        except Exception as e:
+            self._mark_api_error('eastmoney', e)
+        return None
+    
+    def fetch_fund_flow_history(self, code, days=100):
+        if self.api_status['eastmoney']['available']:
+            result = self.fetch_fund_flow_history_eastmoney(code, days)
+            if result:
+                return result, 'eastmoney'
+        return None, None
+    
+    def fetch_fund_flow_intraday(self, code, klt=1):
+        if self.api_status['eastmoney']['available']:
+            result = self.fetch_fund_flow_intraday_eastmoney(code, klt)
+            if result:
+                return result, 'eastmoney'
+        return None, None
+    
+    def fetch_fund_flow_ranking(self, board='a_share', sort_by='f62', sort_order='desc', limit=50):
+        if self.api_status['eastmoney']['available']:
+            result = self.fetch_fund_flow_ranking_eastmoney(board, sort_by, sort_order, limit)
+            if result:
+                return result, 'eastmoney'
+        return None, None
+    
     def get_api_status(self):
         return self.api_status.copy()
 
