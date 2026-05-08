@@ -80,7 +80,6 @@ class StockDataPool:
             'is_trading_day': is_trading_day,
             'is_trading_time': is_trading_time,
             'trading_session': trading_session,
-            'agent_rule': '每次股票分析任务开始前必须先调用 get_current_time，并以 date 作为默认分析截止日期；涉及当日数据时需结合 is_trading_time/trading_session 判断是否需要实时行情。'
         }
 
     def _request_includes_today(self, start_date=None, end_date=None):
@@ -397,8 +396,9 @@ class StockDataPool:
         finally:
             conn.close()
 
-    def list_sync_jobs(self, limit=20):
+    def list_sync_jobs(self, limit=20, offset=0):
         limit = self._normalize_positive_int(limit, 20, 100)
+        offset = self._normalize_positive_int(offset, 0, 100000)
         conn = self._connect()
         try:
             cursor = conn.cursor()
@@ -407,7 +407,8 @@ class StockDataPool:
                 FROM service_sync_jobs
                 ORDER BY updated_at DESC
                 LIMIT ?
-            ''', (limit,))
+                OFFSET ?
+            ''', (limit, offset))
             return [self._sync_job_from_row(row) for row in cursor.fetchall()]
         finally:
             conn.close()
@@ -444,6 +445,18 @@ class StockDataPool:
         if limit <= 0 or limit > 10000:
             raise ValueError('limit 必须在 1 到 10000 之间')
         return limit
+
+    @staticmethod
+    def _normalize_offset(offset):
+        if offset is None:
+            return 0
+        try:
+            offset = int(offset)
+        except (TypeError, ValueError):
+            raise ValueError('offset 必须是非负整数')
+        if offset < 0 or offset > 1000000:
+            raise ValueError('offset 必须在 0 到 1000000 之间')
+        return offset
     
     def fetch_kline_data(self, code, days=250):
         klines, api_name = self.api.fetch_kline(code, days)
@@ -697,7 +710,7 @@ class StockDataPool:
         conn.commit()
         conn.close()
     
-    def check_data_freshness(self, code, data_type='daily'):
+    def check_data_freshness(self, code, data_type='daily', klt=None):
         conn = self._connect()
         cursor = conn.cursor()
         
@@ -721,13 +734,18 @@ class StockDataPool:
                 }
         
         elif data_type == 'minute':
-            cursor.execute('''
-                SELECT MAX(data_time) FROM stock_minute WHERE code = ?
-            ''', (code,))
+            if klt is None:
+                cursor.execute('''
+                    SELECT MAX(data_time) FROM stock_minute WHERE code = ?
+                ''', (code,))
+            else:
+                cursor.execute('''
+                    SELECT MAX(data_time) FROM stock_minute WHERE code = ? AND klt = ?
+                ''', (code, klt))
             result = cursor.fetchone()
             if result and result[0]:
                 latest_time = result[0]
-                today = datetime.now().strftime('%Y-%m-%d')
+                today = self.get_current_time_info()['date']
                 conn.close()
                 return {
                     'has_data': True,
@@ -849,8 +867,9 @@ class StockDataPool:
             }
         return None
     
-    def get_daily_data(self, code, start_date=None, end_date=None, limit=None, include_realtime=True):
+    def get_daily_data(self, code, start_date=None, end_date=None, limit=None, offset=0, include_realtime=True):
         limit = self._normalize_limit(limit)
+        offset = self._normalize_offset(offset)
         conn = self._connect()
         cursor = conn.cursor()
         
@@ -869,6 +888,12 @@ class StockDataPool:
         if limit:
             sql += ' LIMIT ?'
             params.append(limit)
+            if offset:
+                sql += ' OFFSET ?'
+                params.append(offset)
+        elif offset:
+            sql += ' LIMIT -1 OFFSET ?'
+            params.append(offset)
         
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -885,7 +910,7 @@ class StockDataPool:
             'amount': r[8],
         } for r in rows]
 
-        if include_realtime and self._request_includes_today(start_date, end_date):
+        if offset == 0 and include_realtime and self._request_includes_today(start_date, end_date):
             time_info = self.get_current_time_info()
             realtime = self.get_realtime_price(code)
             if data:
@@ -904,7 +929,9 @@ class StockDataPool:
 
         return data
     
-    def get_valuation_data(self, code, start_date=None, end_date=None):
+    def get_valuation_data(self, code, start_date=None, end_date=None, limit=None, offset=0):
+        limit = self._normalize_limit(limit)
+        offset = self._normalize_offset(offset)
         conn = self._connect()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -920,6 +947,16 @@ class StockDataPool:
             params.append(end_date)
         
         sql += ' ORDER BY data_date DESC'
+
+        if limit:
+            sql += ' LIMIT ?'
+            params.append(limit)
+            if offset:
+                sql += ' OFFSET ?'
+                params.append(offset)
+        elif offset:
+            sql += ' LIMIT -1 OFFSET ?'
+            params.append(offset)
         
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -940,8 +977,9 @@ class StockDataPool:
             'missing_fields': json.loads(r['missing_fields']) if r['missing_fields'] else [],
         } for r in rows]
     
-    def get_technical_data(self, code, start_date=None, end_date=None, limit=None):
+    def get_technical_data(self, code, start_date=None, end_date=None, limit=None, offset=0):
         limit = self._normalize_limit(limit)
+        offset = self._normalize_offset(offset)
         conn = self._connect()
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -961,6 +999,12 @@ class StockDataPool:
         if limit:
             sql += ' LIMIT ?'
             params.append(limit)
+            if offset:
+                sql += ' OFFSET ?'
+                params.append(offset)
+        elif offset:
+            sql += ' LIMIT -1 OFFSET ?'
+            params.append(offset)
         
         cursor.execute(sql, params)
         rows = cursor.fetchall()
@@ -1463,29 +1507,28 @@ class StockDataPool:
         print(f"更新 {code} {klt}分钟K线...")
         
         if not force:
-            freshness = self.check_data_freshness(code, 'minute')
+            freshness = self.check_data_freshness(code, 'minute', klt=klt)
             if freshness['has_data']:
                 latest_time_str = freshness['latest_time']
-                today = datetime.now().strftime('%Y-%m-%d')
+                today = self.get_current_time_info()['date']
                 
                 if not latest_time_str.startswith(today):
-                    print(f"  数据已是历史数据（{latest_time_str}），跳过更新")
-                    return
-                
-                now = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
-                latest_time = datetime.strptime(latest_time_str, '%Y-%m-%d %H:%M')
-                minutes_diff = (now - latest_time).total_seconds() / 60
+                    print(f"  本地分钟数据停留在 {latest_time_str}，继续更新")
+                else:
+                    now = datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
+                    latest_time = datetime.strptime(latest_time_str, '%Y-%m-%d %H:%M')
+                    minutes_diff = (now - latest_time).total_seconds() / 60
 
-                is_trading_time = self.get_current_time_info()['is_trading_time']
-                
-                if not is_trading_time:
-                    print(f"  当前非交易时间，数据已是最新（{latest_time_str}），跳过更新")
-                    return
-                
-                if minutes_diff < 5:
-                    print(f"  数据已是最新（{latest_time_str}），跳过更新")
-                    return
-        
+                    is_trading_time = self.get_current_time_info()['is_trading_time']
+
+                    if not is_trading_time:
+                        print(f"  当前非交易时间，数据已是最新（{latest_time_str}），跳过更新")
+                        return
+
+                    if minutes_diff < klt:
+                        print(f"  数据已是最新（{latest_time_str}），跳过更新")
+                        return
+
         klines = self.fetch_minute_data(code, klt, days)
         if klines:
             count = self.save_minute_data(code, klines, klt)
@@ -1493,8 +1536,9 @@ class StockDataPool:
         
         time.sleep(delay)
     
-    def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None):
+    def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0):
         limit = self._normalize_limit(limit)
+        offset = self._normalize_offset(offset)
         conn = self._connect()
         cursor = conn.cursor()
         
@@ -1513,6 +1557,12 @@ class StockDataPool:
         if limit:
             sql += ' LIMIT ?'
             params.append(limit)
+            if offset:
+                sql += ' OFFSET ?'
+                params.append(offset)
+        elif offset:
+            sql += ' LIMIT -1 OFFSET ?'
+            params.append(offset)
         
         cursor.execute(sql, params)
         rows = cursor.fetchall()

@@ -114,6 +114,37 @@ class TestAPIProvider(unittest.TestCase):
         self.assertIn('m:1+t:2,m:0+t:6', calls[0][1]['fs'])
         print(f"  外部接口返回: {result['codes']}")
 
+    def test_stock_universe_native_pagination(self):
+        print("\n[测试] 股票池原生分页参数")
+        api = StockAPIProvider()
+        calls = []
+
+        class FakeResponse:
+            def json(self):
+                return {
+                    'data': {
+                        'total': 120,
+                        'diff': [
+                            {'f12': '000050', 'f13': 0, 'f14': '分页样本', 'f20': 1, 'f21': 1, 'f100': '测试'},
+                        ]
+                    }
+                }
+
+        def fake_request(url, params=None, headers=None, timeout=None):
+            calls.append(params)
+            return FakeResponse()
+
+        api._request_with_retry = fake_request
+        result = api.fetch_stock_universe('main', page=2, page_size=50)
+
+        self.assertEqual(calls[0]['pn'], '2')
+        self.assertEqual(calls[0]['pz'], '50')
+        self.assertEqual(result['page'], 2)
+        self.assertEqual(result['page_size'], 50)
+        self.assertTrue(result['has_more'])
+        self.assertEqual(result['codes'], ['000050'])
+        print("  原生 pn/pz 已透出")
+
     def test_stock_universe_supports_required_markets(self):
         print("\n[测试] 股票池支持全A/创业板/科创板")
         api = StockAPIProvider()
@@ -785,6 +816,30 @@ class TestStockDataPool(unittest.TestCase):
         self.assertEqual(len(pool.get_minute_data('000001')), 1)
 
         print("  坏数据已跳过且有效数据保存成功")
+
+    def test_update_minute_refreshes_stale_data_for_requested_klt(self):
+        print("\n[测试] 分钟K线按klt检查新鲜度")
+        pool = StockDataPool(':memory:')
+        pool.save_minute_data('000001', ['2000-01-01 09:35,10,10,10,10,0,0'], 5)
+
+        class FakeAPI:
+            def __init__(self):
+                self.calls = []
+
+            def fetch_minute_kline(self, code, klt, days):
+                self.calls.append((code, klt, days))
+                return ['2026-05-08 09:35,11,12,13,10,100,1200'], 'fake'
+
+        fake_api = FakeAPI()
+        pool.api = fake_api
+
+        self.assertFalse(pool.check_data_freshness('000001', 'minute', klt=1)['has_data'])
+        pool.update_minute_data('000001', klt=5, days=1, delay=0)
+
+        self.assertEqual(fake_api.calls, [('000001', 5, 1)])
+        self.assertEqual(len(pool.get_minute_data('000001', klt=5)), 2)
+
+        print("  历史分钟数据不会阻止拉取，不同klt互不干扰")
 
     def test_analyze_intraday_edge_cases(self):
         print("\n[测试] 日内分析边界场景")

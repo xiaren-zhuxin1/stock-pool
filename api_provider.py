@@ -32,7 +32,9 @@ class StockAPIProvider:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json, text/plain, */*',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
+            # requests may not have brotli support in the MCP runtime; asking
+            # Eastmoney for br can leave response.json() with compressed bytes.
+            'Accept-Encoding': 'gzip, deflate',
             'Connection': 'keep-alive',
             'Cache-Control': 'no-cache',
             'Pragma': 'no-cache',
@@ -217,7 +219,7 @@ class StockAPIProvider:
         
         return None, None
 
-    def fetch_stock_universe_eastmoney(self, board='main', limit=None, page_size=100):
+    def fetch_stock_universe_eastmoney(self, board='main', limit=None, page_size=100, page=None):
         """从东方财富列表接口获取候选股票池，不使用本地缓存数据库。"""
         board_fs = {
             'a_share': 'm:1+t:2,m:1+t:23,m:0+t:6,m:0+t:80,m:0+t:81+s:2048',
@@ -253,6 +255,12 @@ class StockAPIProvider:
         except (TypeError, ValueError):
             page_size = 100
 
+        if page is not None:
+            try:
+                page = max(1, int(page))
+            except (TypeError, ValueError):
+                page = 1
+
         if limit is not None:
             try:
                 limit = max(0, int(limit))
@@ -264,6 +272,9 @@ class StockAPIProvider:
                     'source': 'eastmoney',
                     'total': None,
                     'returned': 0,
+                    'page': page,
+                    'page_size': page_size,
+                    'has_more': False,
                     'stocks': [],
                     'codes': [],
                 }
@@ -271,12 +282,12 @@ class StockAPIProvider:
         url = "http://80.push2.eastmoney.com/api/qt/clist/get"
         results = []
         total = None
-        page = 1
+        current_page = page or 1
 
         try:
             while True:
                 params = {
-                    'pn': str(page),
+                    'pn': str(current_page),
                     'pz': str(page_size),
                     'po': '1',
                     'np': '1',
@@ -336,13 +347,18 @@ class StockAPIProvider:
                             'source': 'eastmoney',
                             'total': total,
                             'returned': len(results),
+                            'page': page,
+                            'page_size': page_size,
+                            'has_more': total is not None and current_page * page_size < total,
                             'stocks': results,
                             'codes': [item['code'] for item in results],
                         }
 
-                if total is not None and page * page_size >= total:
+                if total is not None and current_page * page_size >= total:
                     break
-                page += 1
+                if page is not None:
+                    break
+                current_page += 1
                 time.sleep(random.uniform(0.05, 0.15))
 
             self._mark_api_success('eastmoney')
@@ -351,6 +367,9 @@ class StockAPIProvider:
                 'source': 'eastmoney',
                 'total': total,
                 'returned': len(results),
+                'page': page,
+                'page_size': page_size,
+                'has_more': total is not None and current_page * page_size < total,
                 'stocks': results,
                 'codes': [item['code'] for item in results],
             }
@@ -361,13 +380,16 @@ class StockAPIProvider:
                 'source': 'eastmoney',
                 'total': total,
                 'returned': len(results),
+                'page': page,
+                'page_size': page_size,
+                'has_more': total is not None and current_page * page_size < total,
                 'stocks': results,
                 'codes': [item['code'] for item in results],
                 'error': str(e),
             }
 
-    def fetch_stock_universe(self, board='main', limit=None, page_size=100):
-        return self.fetch_stock_universe_eastmoney(board, limit=limit, page_size=page_size)
+    def fetch_stock_universe(self, board='main', limit=None, page_size=100, page=None):
+        return self.fetch_stock_universe_eastmoney(board, limit=limit, page_size=page_size, page=page)
     
     def fetch_realtime_eastmoney(self, code):
         try:
