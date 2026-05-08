@@ -317,6 +317,89 @@ class TestMCPToolBoundaries(unittest.TestCase):
         self.assertIn('逐只或小批次', realtime['error'])
         print("  大列表已被引导到筛选/同步流程")
 
+    def test_mcp_large_update_stocks_runs_in_background(self):
+        print("\n[测试] MCP较大批量更新转后台任务")
+        original_update_stock = mcp_server.pool.update_stock
+        with mcp_server.SYNC_JOBS_LOCK:
+            mcp_server.SYNC_JOBS.clear()
+
+        updated = []
+
+        def fake_update_stock(code, days=250, delay=1.5, force=False):
+            updated.append((code, days, delay))
+
+        try:
+            mcp_server.pool.update_stock = fake_update_stock
+            codes = [f'{i:06d}' for i in range(mcp_server.MAX_INLINE_UPDATE_CODES + 1)]
+            started = mcp_server.handle_tool_call('update_stocks', {
+                'codes': codes,
+                'days': 10,
+                'delay': 0,
+            })
+
+            self.assertTrue(started['success'])
+            self.assertIn('job', started)
+            job_id = started['job']['job_id']
+
+            status = None
+            for _ in range(30):
+                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
+                if status['job']['status'] == 'completed':
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(status['job']['status'], 'completed')
+            self.assertEqual(status['job']['result']['updated'], len(codes))
+            self.assertEqual(len(updated), len(codes))
+            print(f"  后台任务完成: {job_id}")
+        finally:
+            mcp_server.pool.update_stock = original_update_stock
+            with mcp_server.SYNC_JOBS_LOCK:
+                mcp_server.SYNC_JOBS.clear()
+
+    def test_mcp_heavy_screen_market_runs_in_background(self):
+        print("\n[测试] MCP重筛选转后台任务")
+        original_screen_market = mcp_server.pool.screen_market
+        with mcp_server.SYNC_JOBS_LOCK:
+            mcp_server.SYNC_JOBS.clear()
+
+        def fake_screen_market(arguments):
+            return {
+                'success': True,
+                'board': arguments.get('board', 'a_share'),
+                'matched_count': 1,
+                'returned': 1,
+                'results': [{'code': '000001'}],
+            }
+
+        try:
+            mcp_server.pool.screen_market = fake_screen_market
+            started = mcp_server.handle_tool_call('screen_market', {
+                'board': 'a_share',
+                'position_min': 0.7,
+                'limit': 50,
+                'include_realtime': True,
+            })
+
+            self.assertTrue(started['success'])
+            self.assertIn('job', started)
+            job_id = started['job']['job_id']
+
+            status = None
+            for _ in range(30):
+                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
+                if status['job']['status'] == 'completed':
+                    break
+                time.sleep(0.05)
+
+            self.assertEqual(status['job']['status'], 'completed')
+            self.assertEqual(status['job']['result']['returned'], 1)
+            print(f"  后台筛选完成: {job_id}")
+        finally:
+            mcp_server.pool.screen_market = original_screen_market
+            with mcp_server.SYNC_JOBS_LOCK:
+                mcp_server.SYNC_JOBS.clear()
+
 
 class TestStockDataPool(unittest.TestCase):
     
@@ -556,6 +639,14 @@ class TestStockDataPool(unittest.TestCase):
         self.assertEqual(result['matched_count'], 1)
         self.assertEqual(result['results'][0]['code'], '000002')
         self.assertEqual(pool.api.realtime_calls, [])
+
+        ratio_result = pool.screen_market({
+            'board': 'gem',
+            'position_max': 0.3,
+            'limit': 10,
+            'include_realtime': False,
+        })
+        self.assertEqual(ratio_result['matched_count'], result['matched_count'])
         print(f"  筛选命中: {[item['code'] for item in result['results']]}")
 
     def test_daily_refresh_uses_cache_gap(self):

@@ -1284,6 +1284,9 @@ class StockDataPool:
             'market_cap_min': self._to_number(criteria.get('market_cap_min')),
             'market_cap_max': self._to_number(criteria.get('market_cap_max')),
         }
+        for key in ('position_min', 'position_max'):
+            if filters[key] is not None and 0 < filters[key] <= 1:
+                filters[key] *= 100
         has_filter = any(value is not None for value in filters.values())
         if not has_filter and not criteria.get('allow_no_filters', False):
             return {

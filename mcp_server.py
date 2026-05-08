@@ -27,6 +27,7 @@ SYNC_WORKER_LOCK = threading.Lock()
 pool.mark_running_sync_jobs_interrupted()
 
 MAX_UPDATE_CODES = 50
+MAX_INLINE_UPDATE_CODES = 10
 MAX_DETAIL_CODES = 30
 MAX_POSITION_CODES = 100
 MAX_REALTIME_CODES = 20
@@ -156,6 +157,248 @@ def _run_market_sync_job(job_id, args):
     finally:
         SYNC_WORKER_LOCK.release()
 
+def _run_code_update_job(job_id, args):
+    try:
+        codes = _normalize_codes_argument(args.get('codes', []))
+        days = args.get('days', 250)
+        delay = args.get('delay', 1.5)
+        summary = {
+            'success': True,
+            'job_type': 'update_stocks',
+            'total': len(codes),
+            'scanned': 0,
+            'updated': 0,
+            'failed': 0,
+            'current_code': None,
+            'results': {},
+        }
+
+        with SYNC_JOBS_LOCK:
+            job = SYNC_JOBS.get(job_id)
+            if job:
+                job['progress'] = dict(summary)
+                job['updated_at'] = _now_text()
+                public = _public_job(job)
+            else:
+                public = None
+        if public:
+            pool.update_sync_job(job_id, progress=public.get('progress'), updated_at=public.get('updated_at'))
+
+        for code in codes:
+            with SYNC_JOBS_LOCK:
+                job = SYNC_JOBS.get(job_id)
+                if job and job['stop_event'].is_set():
+                    summary['stopped'] = True
+                    break
+                if job:
+                    job['progress'] = dict(summary, current_code=code)
+                    job['updated_at'] = _now_text()
+                    public = _public_job(job)
+                else:
+                    public = None
+            if public:
+                pool.update_sync_job(job_id, progress=public.get('progress'), updated_at=public.get('updated_at'))
+
+            summary['current_code'] = code
+            summary['scanned'] += 1
+            try:
+                pool.update_stock(code, days=days, delay=delay)
+                summary['updated'] += 1
+                summary['results'][code] = 'success'
+            except Exception as e:
+                summary['failed'] += 1
+                summary['results'][code] = str(e)
+                print(f"  批量更新失败 {code}: {e}")
+
+            with SYNC_JOBS_LOCK:
+                job = SYNC_JOBS.get(job_id)
+                if job:
+                    job['progress'] = dict(summary)
+                    job['updated_at'] = _now_text()
+                    public = _public_job(job)
+                else:
+                    public = None
+            if public:
+                pool.update_sync_job(job_id, progress=public.get('progress'), updated_at=public.get('updated_at'))
+
+        summary['current_code'] = None
+        with SYNC_JOBS_LOCK:
+            job = SYNC_JOBS.get(job_id)
+            if job:
+                job['status'] = 'cancelled' if summary.get('stopped') else 'completed'
+                job['result'] = summary
+                job['progress'] = summary
+                job['finished_at'] = _now_text()
+                job['updated_at'] = job['finished_at']
+                public = _public_job(job)
+            else:
+                public = None
+        if public:
+            pool.update_sync_job(
+                job_id,
+                status=public.get('status'),
+                result=public.get('result'),
+                progress=public.get('progress'),
+                finished_at=public.get('finished_at'),
+                updated_at=public.get('updated_at')
+            )
+    except Exception as e:
+        with SYNC_JOBS_LOCK:
+            job = SYNC_JOBS.get(job_id)
+            if job:
+                job['status'] = 'failed'
+                job['error'] = str(e)
+                job['finished_at'] = _now_text()
+                job['updated_at'] = job['finished_at']
+                public = _public_job(job)
+            else:
+                public = None
+        if public:
+            pool.update_sync_job(
+                job_id,
+                status=public.get('status'),
+                error=public.get('error'),
+                finished_at=public.get('finished_at'),
+                updated_at=public.get('updated_at')
+            )
+    finally:
+        SYNC_WORKER_LOCK.release()
+
+def start_code_update(arguments):
+    codes = _normalize_codes_argument((arguments or {}).get("codes", []))
+    if not SYNC_WORKER_LOCK.acquire(blocking=False):
+        return {
+            "success": False,
+            "error": "已有后台更新任务正在运行，请用 get_market_sync_status 查看进度。"
+        }
+
+    args = dict(arguments or {})
+    args['codes'] = codes
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        'job_id': job_id,
+        'status': 'running',
+        'args': args,
+        'created_at': _now_text(),
+        'updated_at': _now_text(),
+        'progress': {
+            'job_type': 'update_stocks',
+            'total': len(codes),
+            'scanned': 0,
+            'updated': 0,
+            'failed': 0,
+            'current_code': None,
+        },
+        'stop_event': threading.Event(),
+    }
+    with SYNC_JOBS_LOCK:
+        SYNC_JOBS[job_id] = job
+    _persist_job(job)
+
+    thread = threading.Thread(target=_run_code_update_job, args=(job_id, args), daemon=True)
+    thread.start()
+    return {
+        "success": True,
+        "job": _public_job(job),
+        "message": "代码列表较大，已转为后台更新任务；用 get_market_sync_status 查询进度。"
+    }
+
+def _run_screen_market_job(job_id, args):
+    try:
+        result = pool.screen_market(args)
+        with SYNC_JOBS_LOCK:
+            job = SYNC_JOBS.get(job_id)
+            if job:
+                job['status'] = 'completed'
+                job['result'] = result
+                job['progress'] = {
+                    'job_type': 'screen_market',
+                    'success': result.get('success'),
+                    'matched_count': result.get('matched_count'),
+                    'returned': result.get('returned'),
+                    'board': args.get('board', 'a_share'),
+                }
+                job['finished_at'] = _now_text()
+                job['updated_at'] = job['finished_at']
+                public = _public_job(job)
+            else:
+                public = None
+        if public:
+            pool.update_sync_job(
+                job_id,
+                status=public.get('status'),
+                result=public.get('result'),
+                progress=public.get('progress'),
+                finished_at=public.get('finished_at'),
+                updated_at=public.get('updated_at')
+            )
+    except Exception as e:
+        with SYNC_JOBS_LOCK:
+            job = SYNC_JOBS.get(job_id)
+            if job:
+                job['status'] = 'failed'
+                job['error'] = str(e)
+                job['finished_at'] = _now_text()
+                job['updated_at'] = job['finished_at']
+                public = _public_job(job)
+            else:
+                public = None
+        if public:
+            pool.update_sync_job(
+                job_id,
+                status=public.get('status'),
+                error=public.get('error'),
+                finished_at=public.get('finished_at'),
+                updated_at=public.get('updated_at')
+            )
+    finally:
+        pass
+
+def _should_background_screen(arguments):
+    arguments = arguments or {}
+    filter_keys = (
+        'position_min', 'position_max', 'pe_ttm_min', 'pe_ttm_max',
+        'pb_min', 'pb_max', 'market_cap_min', 'market_cap_max'
+    )
+    if not any(arguments.get(key) is not None for key in filter_keys) and not arguments.get('allow_no_filters', False):
+        return False
+    if arguments.get('background'):
+        return True
+    if arguments.get('include_realtime'):
+        return True
+    board = arguments.get('board') or arguments.get('market') or 'a_share'
+    broad_boards = {'a_share', 'all_a', 'all', 'hs_a', '全A', '全A股', '全市场', '沪深A股'}
+    return board in broad_boards and arguments.get('universe_limit') is None
+
+def start_screen_market(arguments):
+    args = dict(arguments or {})
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        'job_id': job_id,
+        'status': 'running',
+        'args': args,
+        'created_at': _now_text(),
+        'updated_at': _now_text(),
+        'progress': {
+            'job_type': 'screen_market',
+            'board': args.get('board', 'a_share'),
+            'matched_count': None,
+            'returned': 0,
+        },
+        'stop_event': threading.Event(),
+    }
+    with SYNC_JOBS_LOCK:
+        SYNC_JOBS[job_id] = job
+    _persist_job(job)
+
+    thread = threading.Thread(target=_run_screen_market_job, args=(job_id, args), daemon=True)
+    thread.start()
+    return {
+        "success": True,
+        "job": _public_job(job),
+        "message": "筛选可能耗时，已转为后台任务；用 get_market_sync_status 查询结果。"
+    }
+
 def start_market_sync(arguments):
     if not SYNC_WORKER_LOCK.acquire(blocking=False):
         return {
@@ -281,7 +524,8 @@ TOOLS = [
                 "days": {"type": "integer", "description": "日K天数，默认250", "default": 250},
                 "include_realtime": {"type": "boolean", "description": "补实时行情", "default": False},
                 "realtime_limit": {"type": "integer", "description": "实时补价上限，默认20，最大50", "default": 20},
-                "batch_size": {"type": "integer", "description": "批大小，默认200，最大500", "default": 200}
+                "batch_size": {"type": "integer", "description": "批大小，默认200，最大500", "default": 200},
+                "background": {"type": "boolean", "description": "强制后台执行", "default": False}
             }
         }
     },
@@ -310,7 +554,8 @@ TOOLS = [
                 "days": {"type": "integer", "description": "日K天数，默认250", "default": 250},
                 "include_realtime": {"type": "boolean", "description": "补实时行情", "default": False},
                 "realtime_limit": {"type": "integer", "description": "实时补价上限，默认20，最大50", "default": 20},
-                "batch_size": {"type": "integer", "description": "批大小，默认200，最大500", "default": 200}
+                "batch_size": {"type": "integer", "description": "批大小，默认200，最大500", "default": 200},
+                "background": {"type": "boolean", "description": "强制后台执行", "default": False}
             }
         }
     },
@@ -366,12 +611,13 @@ TOOLS = [
     },
     {
         "name": "update_stocks",
-        "description": "批量更新指定股票。单次最多50只；大量请分批，避免超时、内存压力和关键信息淹没。",
+        "description": "批量更新指定股票。最多50只；超过10只自动后台执行，返回 job_id 后用 get_market_sync_status 查进度。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "codes": {"type": "array", "items": {"type": "string"}, "description": "股票代码列表"},
-                "days": {"type": "integer", "description": "天数，默认250", "default": 250}
+                "days": {"type": "integer", "description": "天数，默认250", "default": 250},
+                "delay": {"type": "number", "description": "单股请求间隔秒，默认1.5", "default": 1.5}
             },
             "required": ["codes"]
         }
@@ -556,9 +802,13 @@ def _handle_tool_call(name, arguments):
             return {"success": True, "data": data}
 
         elif name == "screen_market":
+            if _should_background_screen(arguments):
+                return start_screen_market(arguments)
             return pool.screen_market(arguments)
 
         elif name == "screen_main_board":
+            if _should_background_screen(arguments):
+                return start_screen_market(dict(arguments or {}, board=(arguments or {}).get('board', 'main')))
             return pool.screen_main_board(arguments)
 
         elif name == "start_market_sync":
@@ -582,8 +832,15 @@ def _handle_tool_call(name, arguments):
             too_many = _reject_large_code_list(codes, MAX_UPDATE_CODES, "update_stocks")
             if too_many:
                 return too_many
+            if len(codes) > MAX_INLINE_UPDATE_CODES:
+                return start_code_update({
+                    "codes": codes,
+                    "days": arguments.get("days", 250),
+                    "delay": arguments.get("delay", 1.5),
+                })
             days = arguments.get("days", 250)
-            result = pool.update_stocks(codes, days)
+            delay = arguments.get("delay", 1.5)
+            result = pool.update_stocks(codes, days, delay=delay)
             return {"success": True, "result": result}
         
         elif name == "get_stock_info":
