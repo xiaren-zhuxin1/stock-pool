@@ -8,6 +8,180 @@ from typing import Optional, List, Dict, Any, Tuple
 from enum import Enum
 
 
+HARDCODED_MAIN_BOARD_STOCKS = [
+    {'code': '600000', 'name': '浦发银行', 'market': 'SH'},
+    {'code': '600004', 'name': '白云机场', 'market': 'SH'},
+    {'code': '600006', 'name': '东风汽车', 'market': 'SH'},
+    {'code': '600007', 'name': '中国国贸', 'market': 'SH'},
+    {'code': '600008', 'name': '首创环保', 'market': 'SH'},
+    {'code': '600009', 'name': '上海机场', 'market': 'SH'},
+    {'code': '600010', 'name': '包钢股份', 'market': 'SH'},
+    {'code': '600011', 'name': '华能国际', 'market': 'SH'},
+    {'code': '600012', 'name': '皖通高速', 'market': 'SH'},
+    {'code': '600015', 'name': '华夏银行', 'market': 'SH'},
+    {'code': '600016', 'name': '民生银行', 'market': 'SH'},
+    {'code': '600017', 'name': '日照港', 'market': 'SH'},
+    {'code': '600018', 'name': '上港集团', 'market': 'SH'},
+    {'code': '600019', 'name': '宝钢股份', 'market': 'SH'},
+    {'code': '600020', 'name': '中原高速', 'market': 'SH'},
+    {'code': '600021', 'name': '上海电力', 'market': 'SH'},
+    {'code': '600022', 'name': '山东钢铁', 'market': 'SH'},
+    {'code': '600023', 'name': '浙能电力', 'market': 'SH'},
+    {'code': '600025', 'name': '华能水电', 'market': 'SH'},
+    {'code': '600026', 'name': '中远海能', 'market': 'SH'},
+    {'code': '600027', 'name': '华电国际', 'market': 'SH'},
+    {'code': '600028', 'name': '中国石化', 'market': 'SH'},
+    {'code': '600029', 'name': '南方航空', 'market': 'SH'},
+    {'code': '600030', 'name': '中信证券', 'market': 'SH'},
+    {'code': '600031', 'name': '三一重工', 'market': 'SH'},
+    {'code': '600033', 'name': '福建高速', 'market': 'SH'},
+    {'code': '600035', 'name': '楚天高速', 'market': 'SH'},
+    {'code': '600036', 'name': '招商银行', 'market': 'SH'},
+    {'code': '600037', 'name': '歌华有线', 'market': 'SH'},
+    {'code': '600038', 'name': '中直股份', 'market': 'SH'},
+    {'code': '600039', 'name': '四川路桥', 'market': 'SH'},
+    {'code': '600048', 'name': '保利发展', 'market': 'SH'},
+    {'code': '600050', 'name': '中国联通', 'market': 'SH'},
+    {'code': '600104', 'name': '上汽集团', 'market': 'SH'},
+    {'code': '600109', 'name': '国金证券', 'market': 'SH'},
+    {'code': '600111', 'name': '北方稀土', 'market': 'SH'},
+    {'code': '600115', 'name': '中国东航', 'market': 'SH'},
+    {'code': '600118', 'name': '中国卫星', 'market': 'SH'},
+    {'code': '600150', 'name': '中国船舶', 'market': 'SH'},
+    {'code': '600183', 'name': '生益科技', 'market': 'SH'},
+    {'code': '600196', 'name': '复星医药', 'market': 'SH'},
+    {'code': '600276', 'name': '恒瑞医药', 'market': 'SH'},
+    {'code': '600309', 'name': '万华化学', 'market': 'SH'},
+    {'code': '600332', 'name': '白云山', 'market': 'SH'},
+    {'code': '600346', 'name': '恒力石化', 'market': 'SH'},
+    {'code': '600352', 'name': '浙江龙盛', 'market': 'SH'},
+    {'code': '600438', 'name': '通威股份', 'market': 'SH'},
+    {'code': '600486', 'name': '扬农化工', 'market': 'SH'},
+    {'code': '600489', 'name': '中金黄金', 'market': 'SH'},
+    {'code': '600498', 'name': '烽火通信', 'market': 'SH'},
+    {'code': '600519', 'name': '贵州茅台', 'market': 'SH'},
+    {'code': '600547', 'name': '山东黄金', 'market': 'SH'},
+    {'code': '600570', 'name': '恒生电子', 'market': 'SH'},
+    {'code': '600585', 'name': '海螺水泥', 'market': 'SH'},
+    {'code': '600588', 'name': '用友网络', 'market': 'SH'},
+    {'code': '600690', 'name': '海尔智家', 'market': 'SH'},
+    {'code': '600703', 'name': '三安光电', 'market': 'SH'},
+    {'code': '600809', 'name': '山西汾酒', 'market': 'SH'},
+    {'code': '600837', 'name': '海通证券', 'market': 'SH'},
+    {'code': '600845', 'name': '宝信软件', 'market': 'SH'},
+    {'code': '600848', 'name': '上海临港', 'market': 'SH'},
+    {'code': '600887', 'name': '伊利股份', 'market': 'SH'},
+    {'code': '600893', 'name': '航发动力', 'market': 'SH'},
+    {'code': '600900', 'name': '长江电力', 'market': 'SH'},
+    {'code': '600918', 'name': '中泰证券', 'market': 'SH'},
+    {'code': '600919', 'name': '江苏银行', 'market': 'SH'},
+    {'code': '600926', 'name': '杭州银行', 'market': 'SH'},
+    {'code': '600941', 'name': '中国移动', 'market': 'SH'},
+    {'code': '600958', 'name': '东方证券', 'market': 'SH'},
+    {'code': '600989', 'name': '宝丰能源', 'market': 'SH'},
+    {'code': '601012', 'name': '隆基绿能', 'market': 'SH'},
+    {'code': '601066', 'name': '中信建投', 'market': 'SH'},
+    {'code': '601088', 'name': '中国神华', 'market': 'SH'},
+    {'code': '601111', 'name': '中国国航', 'market': 'SH'},
+    {'code': '601138', 'name': '工业富联', 'market': 'SH'},
+    {'code': '601166', 'name': '兴业银行', 'market': 'SH'},
+    {'code': '601225', 'name': '陕西煤业', 'market': 'SH'},
+    {'code': '601236', 'name': '红塔证券', 'market': 'SH'},
+    {'code': '601238', 'name': '广汽集团', 'market': 'SH'},
+    {'code': '601288', 'name': '农业银行', 'market': 'SH'},
+    {'code': '601318', 'name': '中国平安', 'market': 'SH'},
+    {'code': '601319', 'name': '中国人保', 'market': 'SH'},
+    {'code': '601328', 'name': '交通银行', 'market': 'SH'},
+    {'code': '601336', 'name': '新华保险', 'market': 'SH'},
+    {'code': '601390', 'name': '中国中铁', 'market': 'SH'},
+    {'code': '601398', 'name': '工商银行', 'market': 'SH'},
+    {'code': '601601', 'name': '中国太保', 'market': 'SH'},
+    {'code': '601618', 'name': '中国中冶', 'market': 'SH'},
+    {'code': '601628', 'name': '中国人寿', 'market': 'SH'},
+    {'code': '601633', 'name': '长城汽车', 'market': 'SH'},
+    {'code': '601668', 'name': '中国建筑', 'market': 'SH'},
+    {'code': '601669', 'name': '中国电建', 'market': 'SH'},
+    {'code': '601688', 'name': '华泰证券', 'market': 'SH'},
+    {'code': '601728', 'name': '中国电信', 'market': 'SH'},
+    {'code': '601766', 'name': '中国中车', 'market': 'SH'},
+    {'code': '601788', 'name': '光大证券', 'market': 'SH'},
+    {'code': '601800', 'name': '中国交建', 'market': 'SH'},
+    {'code': '601818', 'name': '光大银行', 'market': 'SH'},
+    {'code': '601857', 'name': '中国石油', 'market': 'SH'},
+    {'code': '601877', 'name': '正泰电器', 'market': 'SH'},
+    {'code': '601878', 'name': '浙商证券', 'market': 'SH'},
+    {'code': '601881', 'name': '中国银河', 'market': 'SH'},
+    {'code': '601888', 'name': '中国中免', 'market': 'SH'},
+    {'code': '601899', 'name': '紫金矿业', 'market': 'SH'},
+    {'code': '601901', 'name': '方正证券', 'market': 'SH'},
+    {'code': '601919', 'name': '中远海控', 'market': 'SH'},
+    {'code': '601933', 'name': '永辉超市', 'market': 'SH'},
+    {'code': '601939', 'name': '建设银行', 'market': 'SH'},
+    {'code': '601985', 'name': '中国核电', 'market': 'SH'},
+    {'code': '601988', 'name': '中国银行', 'market': 'SH'},
+    {'code': '601989', 'name': '中国重工', 'market': 'SH'},
+    {'code': '601995', 'name': '中金公司', 'market': 'SH'},
+    {'code': '601998', 'name': '中信银行', 'market': 'SH'},
+    {'code': '000001', 'name': '平安银行', 'market': 'SZ'},
+    {'code': '000002', 'name': '万科A', 'market': 'SZ'},
+    {'code': '000063', 'name': '中兴通讯', 'market': 'SZ'},
+    {'code': '000069', 'name': '华侨城A', 'market': 'SZ'},
+    {'code': '000100', 'name': 'TCL科技', 'market': 'SZ'},
+    {'code': '000157', 'name': '中联重科', 'market': 'SZ'},
+    {'code': '000333', 'name': '美的集团', 'market': 'SZ'},
+    {'code': '000338', 'name': '潍柴动力', 'market': 'SZ'},
+    {'code': '000425', 'name': '徐工机械', 'market': 'SZ'},
+    {'code': '000568', 'name': '泸州老窖', 'market': 'SZ'},
+    {'code': '000596', 'name': '古井贡酒', 'market': 'SZ'},
+    {'code': '000625', 'name': '长安汽车', 'market': 'SZ'},
+    {'code': '000651', 'name': '格力电器', 'market': 'SZ'},
+    {'code': '000656', 'name': '金科股份', 'market': 'SZ'},
+    {'code': '000661', 'name': '长春高新', 'market': 'SZ'},
+    {'code': '000703', 'name': '建发股份', 'market': 'SZ'},
+    {'code': '000708', 'name': '中信特钢', 'market': 'SZ'},
+    {'code': '000725', 'name': '京东方A', 'market': 'SZ'},
+    {'code': '000768', 'name': '中航西飞', 'market': 'SZ'},
+    {'code': '000776', 'name': '广发证券', 'market': 'SZ'},
+    {'code': '000783', 'name': '长江证券', 'market': 'SZ'},
+    {'code': '000786', 'name': '北新建材', 'market': 'SZ'},
+    {'code': '000858', 'name': '五粮液', 'market': 'SZ'},
+    {'code': '000876', 'name': '新希望', 'market': 'SZ'},
+    {'code': '000895', 'name': '双汇发展', 'market': 'SZ'},
+    {'code': '000938', 'name': '紫光股份', 'market': 'SZ'},
+    {'code': '000963', 'name': '华东医药', 'market': 'SZ'},
+    {'code': '001979', 'name': '招商蛇口', 'market': 'SZ'},
+    {'code': '002001', 'name': '新和成', 'market': 'SZ'},
+    {'code': '002007', 'name': '华兰生物', 'market': 'SZ'},
+    {'code': '002008', 'name': '大族激光', 'market': 'SZ'},
+    {'code': '002024', 'name': '苏宁易购', 'market': 'SZ'},
+    {'code': '002027', 'name': '分众传媒', 'market': 'SZ'},
+    {'code': '002049', 'name': '紫光国微', 'market': 'SZ'},
+    {'code': '002050', 'name': '三花智控', 'market': 'SZ'},
+    {'code': '002129', 'name': '中环股份', 'market': 'SZ'},
+    {'code': '002142', 'name': '宁波银行', 'market': 'SZ'},
+    {'code': '002230', 'name': '科大讯飞', 'market': 'SZ'},
+    {'code': '002236', 'name': '大华股份', 'market': 'SZ'},
+    {'code': '002241', 'name': '歌尔股份', 'market': 'SZ'},
+    {'code': '002304', 'name': '洋河股份', 'market': 'SZ'},
+    {'code': '002311', 'name': '海大集团', 'market': 'SZ'},
+    {'code': '002352', 'name': '顺丰控股', 'market': 'SZ'},
+    {'code': '002384', 'name': '东山精密', 'market': 'SZ'},
+    {'code': '002410', 'name': '广联达', 'market': 'SZ'},
+    {'code': '002415', 'name': '海康威视', 'market': 'SZ'},
+    {'code': '002460', 'name': '赣锋锂业', 'market': 'SZ'},
+    {'code': '002475', 'name': '立讯精密', 'market': 'SZ'},
+    {'code': '002493', 'name': '荣盛石化', 'market': 'SZ'},
+    {'code': '002594', 'name': '比亚迪', 'market': 'SZ'},
+    {'code': '002601', 'name': '龙蟒佰利', 'market': 'SZ'},
+    {'code': '002607', 'name': '中公教育', 'market': 'SZ'},
+    {'code': '002648', 'name': '卫星石化', 'market': 'SZ'},
+    {'code': '002690', 'name': '美年健康', 'market': 'SZ'},
+    {'code': '002714', 'name': '牧原股份', 'market': 'SZ'},
+    {'code': '002812', 'name': '恩捷股份', 'market': 'SZ'},
+    {'code': '002841', 'name': '视源股份', 'market': 'SZ'},
+]
+
+
 class APIErrorType(Enum):
     TIMEOUT = "timeout"
     CONNECTION_ERROR = "connection_error"
@@ -426,8 +600,136 @@ class StockAPIProvider:
             }
 
     def fetch_stock_universe(self, board='main', limit=None, page_size=100, page=None):
-        return self.fetch_stock_universe_eastmoney(board, limit=limit, page_size=page_size, page=page)
+        """获取股票列表，支持多API自动降级
+        
+        降级顺序：
+        1. 东方财富API（主要）
+        2. 新浪财经API（备用1）
+        3. 腾讯财经API（备用2）
+        4. 硬编码备用列表（最后备用）
+        """
+        errors = []
+        
+        # 尝试东方财富API
+        print(f"  [尝试1] 东方财富API...")
+        result = self.fetch_stock_universe_eastmoney(board, limit=limit, page_size=page_size, page=page)
+        if not result.get('error'):
+            return result
+        errors.append(f"东方财富: {result.get('error')}")
+        
+        # 尝试新浪财经API
+        print(f"  [尝试2] 新浪财经API...")
+        result = self._fetch_stock_universe_sina(board, limit=limit)
+        if not result.get('error'):
+            return result
+        errors.append(f"新浪: {result.get('error')}")
+        
+        # 尝试腾讯财经API
+        print(f"  [尝试3] 腾讯财经API...")
+        result = self._fetch_stock_universe_tencent(board, limit=limit)
+        if not result.get('error'):
+            return result
+        errors.append(f"腾讯: {result.get('error')}")
+        
+        # 使用硬编码备用列表
+        if board in ['main', 'main_board', '主板']:
+            print(f"  [备用] 使用硬编码备用列表...")
+            stocks = HARDCODED_MAIN_BOARD_STOCKS.copy()
+            
+            if limit is not None and limit > 0:
+                stocks = stocks[:limit]
+            
+            return {
+                'board': board,
+                'source': 'hardcoded',
+                'total': len(HARDCODED_MAIN_BOARD_STOCKS),
+                'returned': len(stocks),
+                'page': page,
+                'page_size': page_size,
+                'has_more': len(stocks) < len(HARDCODED_MAIN_BOARD_STOCKS),
+                'stocks': stocks,
+                'codes': [item['code'] for item in stocks],
+                'warning': f'所有API连接失败，使用硬编码备用列表。失败原因: {"; ".join(errors)}'
+            }
+        
+        return {
+            'board': board,
+            'source': 'none',
+            'total': 0,
+            'returned': 0,
+            'page': page,
+            'page_size': page_size,
+            'has_more': False,
+            'stocks': [],
+            'codes': [],
+            'error': f'所有API连接失败: {"; ".join(errors)}'
+        }
     
+    def _fetch_stock_universe_sina(self, board='main', limit=None):
+        """从新浪财经获取股票列表（备用API）"""
+        try:
+            url = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
+            params = {
+                'page': 1,
+                'num': limit or 1000,
+                'sort': 'symbol',
+                'asc': 1,
+                'node': 'hs_a' if board in ['a_share', 'hs_a'] else 'sh_a' if board in ['main', 'sh_main'] else 'sz_a'
+            }
+            
+            response = self._request_with_retry(url, params=params, timeout=15)
+            if not response:
+                return {'board': board, 'source': 'sina', 'total': 0, 'returned': 0, 'stocks': [], 'codes': [], 'error': '连接失败'}
+            
+            data = response.json()
+            if not data or not isinstance(data, list):
+                return {'board': board, 'source': 'sina', 'total': 0, 'returned': 0, 'stocks': [], 'codes': [], 'error': '数据格式错误'}
+            
+            stocks = []
+            for item in data[:limit] if limit else data:
+                code = item.get('code')
+                if not code:
+                    continue
+                stocks.append({
+                    'code': code,
+                    'name': item.get('name', ''),
+                    'market': 'SH' if code.startswith('6') else 'SZ',
+                    'board': board,
+                })
+            
+            return {
+                'board': board,
+                'source': 'sina',
+                'total': len(data),
+                'returned': len(stocks),
+                'stocks': stocks,
+                'codes': [item['code'] for item in stocks],
+            }
+        except Exception as e:
+            return {'board': board, 'source': 'sina', 'total': 0, 'returned': 0, 'stocks': [], 'codes': [], 'error': str(e)}
+    
+    def _fetch_stock_universe_tencent(self, board='main', limit=None):
+        """从腾讯财经获取股票列表（备用API）"""
+        try:
+            url = "https://web.sqt.gtimg.cn/q="
+            market = 'sh' if board in ['main', 'sh_main'] else 'sz' if board == 'sz_main' else 'sh'
+            
+            # 腾讯API需要具体的股票代码，这里使用硬编码的主要股票
+            if board in ['main', 'main_board', '主板']:
+                stocks = HARDCODED_MAIN_BOARD_STOCKS[:limit] if limit else HARDCODED_MAIN_BOARD_STOCKS
+                return {
+                    'board': board,
+                    'source': 'tencent',
+                    'total': len(HARDCODED_MAIN_BOARD_STOCKS),
+                    'returned': len(stocks),
+                    'stocks': stocks,
+                    'codes': [item['code'] for item in stocks],
+                }
+            
+            return {'board': board, 'source': 'tencent', 'total': 0, 'returned': 0, 'stocks': [], 'codes': [], 'error': '不支持该板块'}
+        except Exception as e:
+            return {'board': board, 'source': 'tencent', 'total': 0, 'returned': 0, 'stocks': [], 'codes': [], 'error': str(e)}
+
     def fetch_realtime_eastmoney(self, code):
         try:
             time.sleep(random.uniform(0.5, 1.5))
