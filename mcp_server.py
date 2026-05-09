@@ -310,10 +310,10 @@ def _handle_update_fund_flow(arguments):
     delay = arguments.get("delay", 1.5)
     force = arguments.get("force", False)
     try:
-        pool.update_fund_flow(code, days, delay, force)
-        return {"success": True, "code": code}
+        result = pool.update_fund_flow(code, days, delay, force)
+        return result
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "code": code, "error": str(e)}
 
 def _handle_get_fund_flow(arguments):
     code = arguments.get("code")

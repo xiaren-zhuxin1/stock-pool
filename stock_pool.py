@@ -310,16 +310,21 @@ class StockDataPool:
             today = datetime.now().strftime('%Y-%m-%d')
             if latest_date == today:
                 print(f"  资金流向数据已是最新（{latest_date}），跳过更新")
-                return
+                return {'success': True, 'code': code, 'skipped': True, 'reason': '数据已是最新'}
         
         print(f"更新 {code} 资金流向...")
         fund_flow_items = self.fetch_fund_flow(code, days)
         
-        if fund_flow_items:
-            self.save_fund_flow_data(code, fund_flow_items)
+        if not fund_flow_items:
+            print(f"  警告：未获取到资金流向数据")
+            return {'success': False, 'code': code, 'error': 'API未返回数据'}
+        
+        saved = self.save_fund_flow_data(code, fund_flow_items)
         
         if delay:
             time.sleep(delay)
+        
+        return {'success': True, 'code': code, 'saved': saved}
     
     def get_fund_flow(self, code, start_date=None, end_date=None, limit=None, offset=0):
         conn = self._connect()
