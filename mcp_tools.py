@@ -1,3 +1,24 @@
+"""
+MCP工具定义
+
+使用指南：
+1. 全市场分析工作流程：
+   - 步骤1：获取所有股票代码 -> get_all_stocks(board='main')
+   - 步骤2：筛选股票 -> screen_all_market(board='main', position_max=30, pe_ttm_max=50)
+   - 步骤3：查询筛选进度 -> get_market_sync_status(job_id)
+   - 步骤4：分析筛选结果 -> analyze_position(codes)
+
+2. 批量更新工作流程：
+   - 步骤1：启动同步 -> start_market_sync(board='main', refresh='stale')
+   - 步骤2：查询进度 -> get_market_sync_status(job_id)
+   - 步骤3：等待完成 -> status='completed'
+
+3. 常见问题：
+   - 如果screen_market返回matched_count=0，说明没有数据，请先更新数据
+   - 如果需要完整结果，使用screen_all_market而不是screen_market
+   - 如果只需要股票列表，使用get_all_stocks而不是start_market_sync
+"""
+
 TOOLS = [
     {
         "name": "get_current_time",
@@ -22,7 +43,7 @@ TOOLS = [
     },
     {
         "name": "get_all_stocks",
-        "description": "一次性获取板块所有股票代码。适用场景：需要完整股票清单，不希望分页。返回所有股票代码和基本信息，可能耗时较长。建议在需要完整数据时使用，否则用get_stock_universe分页获取。",
+        "description": "一次性获取板块所有股票代码。适用场景：需要完整股票清单，不希望分页。返回所有股票代码和基本信息，可能耗时较长。建议在需要完整数据时使用，否则用get_stock_universe分页获取。使用示例：获取主板所有股票 -> get_all_stocks(board='main')，返回codes列表后可用于批量更新或筛选。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -32,7 +53,7 @@ TOOLS = [
     },
     {
         "name": "screen_market",
-        "description": "按板块、52周位置、估值、市值筛选股票。需至少一个筛选条件；全市场初筛首选。分页说明：默认返回50条，最多200条。结果超过200条时使用offset分页：offset=0获取1-50条，offset=50获取51-100条，以此类推。建议先用默认limit=50查看结果数量，再决定是否需要分页。",
+        "description": "按板块、52周位置、估值、市值筛选股票。需至少一个筛选条件；全市场初筛首选。分页说明：默认返回50条，最多200条。结果超过200条时使用offset分页：offset=0获取1-50条，offset=50获取51-100条，以此类推。建议先用默认limit=50查看结果数量，再决定是否需要分页。重要：筛选前需要先更新股票数据。如果返回matched_count=0，可能是因为没有数据，请先用start_market_sync更新数据，或用screen_all_market自动更新。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -62,7 +83,7 @@ TOOLS = [
     },
     {
         "name": "screen_all_market",
-        "description": "筛选所有符合条件的股票，无数量限制。适用场景：需要完整筛选结果，不希望分页。自动后台执行，返回job_id后用get_market_sync_status查进度。建议在筛选结果可能很多时使用，否则用screen_market分页获取。",
+        "description": "筛选所有符合条件的股票，无数量限制。适用场景：需要完整筛选结果，不希望分页。自动后台执行，返回job_id后用get_market_sync_status查进度。建议在筛选结果可能很多时使用，否则用screen_market分页获取。工作流程：1. 调用screen_all_market设置筛选条件，获得job_id；2. 用get_market_sync_status(job_id)查询进度，等待status='completed'；3. 从result字段获取完整筛选结果。示例：筛选主板低估值股票 -> screen_all_market(board='main', position_max=30, pe_ttm_max=50)。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -115,7 +136,7 @@ TOOLS = [
     },
     {
         "name": "start_market_sync",
-        "description": "启动板块数据同步任务，返回 job_id 和进度。不返回股票详情。",
+        "description": "启动板块数据同步任务，返回 job_id 和进度。不返回股票详情。适用场景：批量更新整个板块的股票数据。工作流程：1. 调用start_market_sync(board='main', refresh='stale')启动同步；2. 用get_market_sync_status(job_id)查询进度，等待status='completed'；3. 同步完成后可用screen_market或screen_all_market筛选股票。注意：此工具只更新数据，不返回股票列表。如需获取股票列表，请用get_all_stocks。",
         "inputSchema": {
             "type": "object",
             "properties": {
