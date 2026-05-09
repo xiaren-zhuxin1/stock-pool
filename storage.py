@@ -500,12 +500,36 @@ def check_data_freshness(conn: sqlite3.Connection, code: str, data_type: str = '
             latest_date = result[1]
             row_count = result[2]
             today = datetime.now().strftime('%Y-%m-%d')
+            is_today = latest_date == today
+            
+            now = datetime.now()
+            hour = now.hour
+            minute = now.minute
+            is_weekday = now.weekday() < 5
+            is_trading_time = is_weekday and (
+                (9 <= hour < 12) or (hour == 9 and minute >= 30) or
+                (13 <= hour < 15) or (hour == 15 and minute == 0)
+            )
+            is_after_close = is_weekday and (hour > 15 or (hour == 15 and minute > 0))
+            
+            should_refresh = False
+            if not is_today:
+                should_refresh = True
+            elif is_trading_time:
+                should_refresh = False
+            elif is_after_close and is_today:
+                should_refresh = False
+            
             return {
                 'has_data': True,
                 'earliest_date': earliest_date,
                 'latest_date': latest_date,
                 'row_count': row_count,
-                'is_today': latest_date == today
+                'is_today': is_today,
+                'is_trading_time': is_trading_time,
+                'is_after_close': is_after_close,
+                'should_refresh': should_refresh,
+                'data_type': 'daily',
             }
     
     elif data_type == 'minute':
@@ -521,10 +545,36 @@ def check_data_freshness(conn: sqlite3.Connection, code: str, data_type: str = '
         if result and result[0]:
             latest_time = result[0]
             today = datetime.now().strftime('%Y-%m-%d')
+            is_today = latest_time.startswith(today)
+            
+            now = datetime.now()
+            hour = now.hour
+            minute = now.minute
+            is_weekday = now.weekday() < 5
+            is_trading_time = is_weekday and (
+                (9 <= hour < 12) or (hour == 9 and minute >= 30) or
+                (13 <= hour < 15) or (hour == 15 and minute == 0)
+            )
+            
+            should_refresh = False
+            if not is_today:
+                should_refresh = True
+            elif is_trading_time:
+                try:
+                    latest_dt = datetime.strptime(latest_time, '%Y-%m-%d %H:%M')
+                    age_minutes = (now - latest_dt).total_seconds() / 60
+                    should_refresh = age_minutes > 5
+                except:
+                    should_refresh = True
+            
             return {
                 'has_data': True,
                 'latest_time': latest_time,
-                'is_today': latest_time.startswith(today)
+                'is_today': is_today,
+                'is_trading_time': is_trading_time,
+                'should_refresh': should_refresh,
+                'data_type': 'minute',
+                'klt': klt,
             }
     
     elif data_type == 'fund_flow':
@@ -537,12 +587,28 @@ def check_data_freshness(conn: sqlite3.Connection, code: str, data_type: str = '
             latest_date = result[1]
             row_count = result[2]
             today = datetime.now().strftime('%Y-%m-%d')
+            is_today = latest_date == today
+            
+            now = datetime.now()
+            hour = now.hour
+            is_weekday = now.weekday() < 5
+            is_after_close = is_weekday and hour >= 16
+            
+            should_refresh = False
+            if not is_today:
+                should_refresh = True
+            elif is_after_close and is_today:
+                should_refresh = False
+            
             return {
                 'has_data': True,
                 'earliest_date': earliest_date,
                 'latest_date': latest_date,
                 'row_count': row_count,
-                'is_today': latest_date == today
+                'is_today': is_today,
+                'is_after_close': is_after_close,
+                'should_refresh': should_refresh,
+                'data_type': 'fund_flow',
             }
     
     return {'has_data': False}

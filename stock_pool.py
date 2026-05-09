@@ -716,11 +716,17 @@ class StockDataPool:
 
     @staticmethod
     def _needs_daily_refresh(freshness, refresh, today):
-        return (
-            refresh == 'force'
-            or (refresh == 'missing' and not freshness.get('has_data'))
-            or (refresh == 'stale' and (not freshness.get('has_data') or freshness.get('latest_date') != today))
-        )
+        if refresh == 'force':
+            return True
+        if refresh == 'missing' and not freshness.get('has_data'):
+            return True
+        if refresh == 'stale':
+            if not freshness.get('has_data'):
+                return True
+            if freshness.get('should_refresh') is not None:
+                return freshness.get('should_refresh')
+            return freshness.get('latest_date') != today
+        return False
 
     def sync_market(self, board='a_share', refresh='stale', max_codes=None, days=250, delay=0.2,
                     progress_callback=None, should_stop=None):
@@ -881,6 +887,9 @@ class StockDataPool:
             by_code = {item['code']: item for item in realtime_rows}
             page = [by_code.get(item['code'], item) for item in page]
 
+        matched_count = len(matched)
+        has_more = (offset + limit) < matched_count
+        
         return {
             'success': True,
             'board': board,
@@ -888,10 +897,18 @@ class StockDataPool:
             'universe_total': universe.get('total'),
             'universe_returned': len(codes),
             'snapshot_count': len(snapshots),
-            'matched_count': len(matched),
+            'matched_count': matched_count,
             'returned': len(page),
             'offset': offset,
             'limit': limit,
+            'has_more': has_more,
+            'page_info': {
+                'current_offset': offset,
+                'current_limit': limit,
+                'total_matched': matched_count,
+                'has_more': has_more,
+                'next_offset': offset + limit if has_more else None,
+            },
             'refresh': refreshed,
             'skipped': {
                 'no_cached_snapshot': skipped_no_snapshot,

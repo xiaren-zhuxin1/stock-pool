@@ -89,12 +89,54 @@ def _handle_get_stock_universe(arguments):
     page = arguments.get("page")
     page_size = arguments.get("page_size", 100)
     data = pool.api.fetch_stock_universe(board=board, limit=limit, page_size=page_size, page=page)
-    return {"success": True, "data": data}
+    
+    result = {
+        "success": True,
+        "board": data.get("board"),
+        "total": data.get("total"),
+        "returned": data.get("returned"),
+        "has_more": data.get("has_more"),
+        "page_info": {
+            "current_page": data.get("page"),
+            "page_size": data.get("page_size"),
+            "total_count": data.get("total"),
+            "has_more": data.get("has_more"),
+            "next_page": (data.get("page") + 1) if data.get("has_more") and data.get("page") else None,
+        },
+        "stocks": data.get("stocks", []),
+        "codes": data.get("codes", []),
+    }
+    
+    if data.get("error"):
+        result["error"] = data.get("error")
+    
+    return result
+
+def _handle_get_all_stocks(arguments):
+    board = arguments.get("board", "a_share")
+    data = pool.api.fetch_stock_universe(board=board, limit=None, page_size=100, page=None)
+    
+    result = {
+        "success": True,
+        "board": data.get("board"),
+        "total": data.get("total"),
+        "returned": data.get("returned"),
+        "stocks": data.get("stocks", []),
+        "codes": data.get("codes", []),
+    }
+    
+    if data.get("error"):
+        result["error"] = data.get("error")
+    
+    return result
 
 def _handle_screen_market(arguments):
     if _should_background_screen(arguments):
         return start_screen_market(pool, arguments)
     return pool.screen_market(arguments)
+
+def _handle_screen_all_market(arguments):
+    return start_screen_market(pool, arguments)
 
 def _handle_screen_main_board(arguments):
     if _should_background_screen(arguments):
@@ -294,7 +336,9 @@ def _handle_legacy_stats(arguments):
 TOOL_HANDLERS = {
     "get_current_time": _handle_get_current_time,
     "get_stock_universe": _handle_get_stock_universe,
+    "get_all_stocks": _handle_get_all_stocks,
     "screen_market": _handle_screen_market,
+    "screen_all_market": _handle_screen_all_market,
     "screen_main_board": _handle_screen_main_board,
     "start_market_sync": lambda args: start_market_sync(pool, args),
     "get_market_sync_status": lambda args: get_market_sync_status(pool, args),

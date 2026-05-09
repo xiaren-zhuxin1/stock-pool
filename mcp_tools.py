@@ -9,20 +9,30 @@ TOOLS = [
     },
     {
         "name": "get_stock_universe",
-        "description": "原生分页返回板块候选代码。筛选用 screen_market。",
+        "description": "原生分页返回板块候选代码。筛选用 screen_market。分页说明：板块股票数通常超过100只，需要分页获取。使用page参数分页（从1开始），每页最多100条。示例：page=1获取前100只，page=2获取101-200只。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
-                "page": {"type": "integer", "description": "原生页码，从1开始"},
-                "page_size": {"type": "integer", "description": "每页数量，默认/最大100", "default": 100},
-                "limit": {"type": "integer", "description": "兼容参数；page为空时限制总数"}
+                "page": {"type": "integer", "description": "页码，从1开始。不传则返回limit指定的数量"},
+                "page_size": {"type": "integer", "description": "每页数量，默认100，最大100", "default": 100},
+                "limit": {"type": "integer", "description": "总数量限制（page为空时生效）"}
+            }
+        }
+    },
+    {
+        "name": "get_all_stocks",
+        "description": "一次性获取板块所有股票代码。适用场景：需要完整股票清单，不希望分页。返回所有股票代码和基本信息，可能耗时较长。建议在需要完整数据时使用，否则用get_stock_universe分页获取。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"}
             }
         }
     },
     {
         "name": "screen_market",
-        "description": "按板块、52周位置、估值、市值筛选股票。需至少一个筛选条件；全市场初筛首选。",
+        "description": "按板块、52周位置、估值、市值筛选股票。需至少一个筛选条件；全市场初筛首选。分页说明：默认返回50条，最多200条。结果超过200条时使用offset分页：offset=0获取1-50条，offset=50获取51-100条，以此类推。建议先用默认limit=50查看结果数量，再决定是否需要分页。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -37,8 +47,8 @@ TOOLS = [
                 "market_cap_max": {"type": "number", "description": "总市值上限"},
                 "sort_by": {"type": "string", "description": "position_pct/pe_ttm/pb/market_cap/close/code/date", "default": "position_pct"},
                 "sort_order": {"type": "string", "description": "asc/desc", "default": "asc"},
-                "limit": {"type": "integer", "description": "返回数，默认50，最大200", "default": 50},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0},
+                "limit": {"type": "integer", "description": "返回数量，默认50，最大200", "default": 50},
+                "offset": {"type": "integer", "description": "分页偏移量。offset=0从第1条开始，offset=50从第51条开始", "default": 0},
                 "universe_limit": {"type": "integer", "description": "候选检查上限；试跑用"},
                 "refresh": {"type": "string", "description": "none/missing/stale/force", "default": "none"},
                 "max_refresh": {"type": "integer", "description": "更新上限；最大200"},
@@ -51,8 +61,31 @@ TOOLS = [
         }
     },
     {
+        "name": "screen_all_market",
+        "description": "筛选所有符合条件的股票，无数量限制。适用场景：需要完整筛选结果，不希望分页。自动后台执行，返回job_id后用get_market_sync_status查进度。建议在筛选结果可能很多时使用，否则用screen_market分页获取。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
+                "position_min": {"type": "number", "description": "52周位置下限"},
+                "position_max": {"type": "number", "description": "52周位置上限"},
+                "pe_ttm_min": {"type": "number", "description": "市盈率TTM下限"},
+                "pe_ttm_max": {"type": "number", "description": "市盈率TTM上限"},
+                "pb_min": {"type": "number", "description": "市净率下限"},
+                "pb_max": {"type": "number", "description": "市净率上限"},
+                "market_cap_min": {"type": "number", "description": "总市值下限"},
+                "market_cap_max": {"type": "number", "description": "总市值上限"},
+                "sort_by": {"type": "string", "description": "position_pct/pe_ttm/pb/market_cap/close/code/date", "default": "position_pct"},
+                "sort_order": {"type": "string", "description": "asc/desc", "default": "asc"},
+                "refresh": {"type": "string", "description": "none/missing/stale/force", "default": "none"},
+                "max_refresh": {"type": "integer", "description": "更新上限；最大200"},
+                "days": {"type": "integer", "description": "日K天数，默认250", "default": 250}
+            }
+        }
+    },
+    {
         "name": "screen_main_board",
-        "description": "按52周位置、估值、市值筛选沪深主板。需至少一个筛选条件。",
+        "description": "按52周位置、估值、市值筛选沪深主板。需至少一个筛选条件。分页说明：默认返回50条，最多200条。结果超过200条时使用offset分页：offset=0获取1-50条，offset=50获取51-100条。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -67,8 +100,8 @@ TOOLS = [
                 "market_cap_max": {"type": "number", "description": "总市值上限"},
                 "sort_by": {"type": "string", "description": "position_pct/pe_ttm/pb/market_cap/close/code/date", "default": "position_pct"},
                 "sort_order": {"type": "string", "description": "asc/desc", "default": "asc"},
-                "limit": {"type": "integer", "description": "返回数，默认50，最大200", "default": 50},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0},
+                "limit": {"type": "integer", "description": "返回数量，默认50，最大200", "default": 50},
+                "offset": {"type": "integer", "description": "分页偏移量。offset=0从第1条开始，offset=50从第51条开始", "default": 0},
                 "universe_limit": {"type": "integer", "description": "候选检查上限；试跑用"},
                 "refresh": {"type": "string", "description": "none/missing/stale/force", "default": "none"},
                 "max_refresh": {"type": "integer", "description": "更新上限；最大200"},
@@ -156,45 +189,45 @@ TOOLS = [
     },
     {
         "name": "get_daily_data",
-        "description": "分页查询日K线。空结果先调用 update_stock。",
+        "description": "分页查询日K线。空结果先调用 update_stock。分页说明：默认返回全部数据，可用limit限制数量。数据量大时建议分页：limit=100, offset=0获取前100条，offset=100获取101-200条。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码"},
                 "start_date": {"type": "string", "description": "开始日期，如 2025-01-01"},
                 "end_date": {"type": "string", "description": "结束日期，如 2026-05-06"},
-                "limit": {"type": "integer", "description": "条数上限"},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0}
+                "limit": {"type": "integer", "description": "返回条数上限。不传则返回全部"},
+                "offset": {"type": "integer", "description": "分页偏移量。offset=0从第1条开始，offset=100从第101条开始", "default": 0}
             },
             "required": ["code"]
         }
     },
     {
         "name": "get_valuation_data",
-        "description": "分页查询 PE、PB 等估值数据。空结果先调用 update_stock。",
+        "description": "分页查询 PE、PB 等估值数据。空结果先调用 update_stock。分页说明：默认返回全部数据，可用limit限制数量。数据量大时建议分页：limit=100, offset=0获取前100条。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码"},
                 "start_date": {"type": "string", "description": "开始日期"},
                 "end_date": {"type": "string", "description": "结束日期"},
-                "limit": {"type": "integer", "description": "条数上限"},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0}
+                "limit": {"type": "integer", "description": "返回条数上限。不传则返回全部"},
+                "offset": {"type": "integer", "description": "分页偏移量。offset=0从第1条开始", "default": 0}
             },
             "required": ["code"]
         }
     },
     {
         "name": "get_technical_data",
-        "description": "分页查询均线、52周位置等技术指标。空结果先调用 update_stock。",
+        "description": "分页查询均线、52周位置等技术指标。空结果先调用 update_stock。分页说明：默认返回全部数据，可用limit限制数量。数据量大时建议分页：limit=100, offset=0获取前100条。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码"},
                 "start_date": {"type": "string", "description": "开始日期"},
                 "end_date": {"type": "string", "description": "结束日期"},
-                "limit": {"type": "integer", "description": "条数上限"},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0}
+                "limit": {"type": "integer", "description": "返回条数上限。不传则返回全部"},
+                "offset": {"type": "integer", "description": "分页偏移量。offset=0从第1条开始", "default": 0}
             },
             "required": ["code"]
         }
@@ -278,7 +311,7 @@ TOOLS = [
     },
     {
         "name": "get_minute_data",
-        "description": "分页查询分钟K线。空结果按 resolution 调用 update_minute_data 或停止重试。",
+        "description": "分页查询分钟K线。空结果按 resolution 调用 update_minute_data 或停止重试。分页说明：分钟数据量大，建议用start_time/end_time限定范围，或用limit分页：limit=500, offset=0获取前500条。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -286,8 +319,8 @@ TOOLS = [
                 "klt": {"type": "integer", "description": "1/5/15/30/60分钟", "default": 5},
                 "start_time": {"type": "string", "description": "开始时间，如 2026-05-07 09:30"},
                 "end_time": {"type": "string", "description": "结束时间，如 2026-05-07 15:00"},
-                "limit": {"type": "integer", "description": "条数上限"},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0}
+                "limit": {"type": "integer", "description": "返回条数上限。不传则返回全部"},
+                "offset": {"type": "integer", "description": "分页偏移量。offset=0从第1条开始", "default": 0}
             },
             "required": ["code"]
         }
@@ -320,15 +353,15 @@ TOOLS = [
     },
     {
         "name": "get_fund_flow",
-        "description": "分页查询资金流向数据。",
+        "description": "分页查询资金流向数据。分页说明：默认返回全部数据，可用limit限制数量。建议用start_date/end_date限定时间范围，或用limit分页：limit=50, offset=0获取前50条。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码"},
                 "start_date": {"type": "string", "description": "开始日期，如 2025-01-01"},
                 "end_date": {"type": "string", "description": "结束日期，如 2026-05-06"},
-                "limit": {"type": "integer", "description": "条数上限"},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0}
+                "limit": {"type": "integer", "description": "返回条数上限。不传则返回全部"},
+                "offset": {"type": "integer", "description": "分页偏移量。offset=0从第1条开始", "default": 0}
             },
             "required": ["code"]
         }
