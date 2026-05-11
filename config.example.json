@@ -1,0 +1,14 @@
+{
+    "providers": {
+        "cache_ttl": 300,
+        "enable_cache": true,
+        "tushare_token": null
+    },
+    "database": {
+        "path": null
+    },
+    "logging": {
+        "level": "INFO",
+        "file": null
+    }
+}
