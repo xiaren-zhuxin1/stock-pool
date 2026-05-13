@@ -44,6 +44,8 @@ class ProviderManager:
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_ttl: int = self.config.get('cache_ttl', 300)
         self._enable_cache: bool = self.config.get('enable_cache', True)
+        self._provider_cooldown: Dict[str, datetime] = {}
+        self._cooldown_seconds: int = self.config.get('cooldown_seconds', 300)
         self._init_providers()
         self._build_capability_index()
 
@@ -170,6 +172,11 @@ class ProviderManager:
                 _log(f"[ProviderManager] {provider.display_name} 未配置，跳过")
                 continue
 
+            cooldown_until = self._provider_cooldown.get(provider_name)
+            if cooldown_until and datetime.now() < cooldown_until:
+                _log(f"[ProviderManager] {provider.display_name} 冷却中，跳过")
+                continue
+
             fallback_chain.append(provider_name)
 
             cache_key = self._get_cache_key(capability, provider=provider_name, **kwargs)
@@ -198,6 +205,7 @@ class ProviderManager:
                 else:
                     last_error = result.error
                     _log(f"[ProviderManager] {provider.display_name} 失败: {result.error.message if result.error else 'Unknown'}")
+                    self._provider_cooldown[provider_name] = datetime.now() + timedelta(seconds=self._cooldown_seconds)
                     if result.error and not result.error.is_recoverable:
                         break
             except Exception as e:
@@ -207,6 +215,7 @@ class ProviderManager:
                     provider_name=provider_name,
                 )
                 _log(f"[ProviderManager] {provider.display_name} 异常: {e}")
+                self._provider_cooldown[provider_name] = datetime.now() + timedelta(seconds=self._cooldown_seconds)
 
         error_msg = f"所有数据源均失败。尝试顺序: {', '.join(fallback_chain)}"
         if last_error:

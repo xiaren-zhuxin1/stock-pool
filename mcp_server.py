@@ -58,6 +58,47 @@ def _log(*args, **kwargs):
     return builtins.print(*args, **kwargs)
 
 
+_SANITIZE_DROP = object()
+_SANITIZE_KEY_MAP = {
+    'cache_used': _SANITIZE_DROP,
+    'no_cached_snapshot': 'missing_data',
+    'refresh_attempted': _SANITIZE_DROP,
+    'refresh_result': _SANITIZE_DROP,
+    'skipped': _SANITIZE_DROP,
+    'snapshot_count': _SANITIZE_DROP,
+    'universe_returned': _SANITIZE_DROP,
+    'universe_total': _SANITIZE_DROP,
+    'criteria': _SANITIZE_DROP,
+    'realtime_used': _SANITIZE_DROP,
+    'realtime_error': _SANITIZE_DROP,
+    'realtime_api': _SANITIZE_DROP,
+    'realtime_fetched_at': _SANITIZE_DROP,
+    'effective_price_source': _SANITIZE_DROP,
+    'missing_fields': _SANITIZE_DROP,
+    'data_quality': _SANITIZE_DROP,
+    'data_source': _SANITIZE_DROP,
+}
+_SANITIZE_VALUE_MAP = {
+    'cache': 'historical_close',
+}
+
+
+def _sanitize_for_agent(value):
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            public_key = _SANITIZE_KEY_MAP.get(key, key)
+            if public_key is _SANITIZE_DROP:
+                continue
+            sanitized[public_key] = _sanitize_for_agent(item)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_for_agent(item) for item in value]
+    if isinstance(value, str):
+        return _SANITIZE_VALUE_MAP.get(value, value)
+    return value
+
+
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock_pool.db')
 SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 logger = Logger()
@@ -247,6 +288,19 @@ class StockPoolServer:
     def check_data_freshness(self, code, data_type='daily', klt=None):
         with self._get_connection() as conn:
             return storage_check_data_freshness(conn, code, data_type, klt)
+
+    def _should_auto_refresh(self, code, data_type='daily'):
+        freshness = self.check_data_freshness(code, data_type)
+        if not freshness.get('has_data'):
+            return True
+        if freshness.get('is_today'):
+            return False
+        try:
+            latest = datetime.strptime(freshness['latest_date'], '%Y-%m-%d').date()
+            gap = (datetime.now().date() - latest).days
+            return gap > 3
+        except (KeyError, TypeError, ValueError):
+            return True
 
     @staticmethod
     def _calculate_daily_fetch_days(freshness, requested_days=250, force=False, today=None):
@@ -464,15 +518,33 @@ class StockPoolServer:
                 time.sleep(delay)
         return results
 
-    def get_stock_info(self, code: str) -> Optional[Dict]:
+    def get_stock_info(self, code: str, auto_refresh: bool = False) -> Optional[Dict]:
         with self._get_connection() as conn:
-            return storage_get_stock_info(conn, code)
+            data = storage_get_stock_info(conn, code)
 
-    def get_daily_data(self, code, start_date=None, end_date=None, limit=None, offset=0, include_realtime=True):
+        if auto_refresh and not data:
+            try:
+                self.update_stock(code, days=250, delay=0, force=True)
+                with self._get_connection() as conn:
+                    data = storage_get_stock_info(conn, code)
+            except Exception:
+                pass
+
+        return data
+
+    def get_daily_data(self, code, start_date=None, end_date=None, limit=None, offset=0, include_realtime=True, auto_refresh=True):
         limit = self._normalize_limit(limit)
         offset = self._normalize_offset(offset)
         with self._get_connection() as conn:
             data = storage_get_daily_data(conn, code, start_date, end_date, limit, offset)
+
+        if auto_refresh and offset == 0 and (not data or self._should_auto_refresh(code, 'daily')):
+            try:
+                self.update_stock(code, days=250, delay=0, force=not data)
+                with self._get_connection() as conn:
+                    data = storage_get_daily_data(conn, code, start_date, end_date, limit, offset)
+            except Exception:
+                pass
 
         if offset == 0 and include_realtime and self._request_includes_today(start_date, end_date):
             time_info = self.get_current_time_info()
@@ -487,17 +559,37 @@ class StockPoolServer:
                 }, realtime, time_info))
         return data
 
-    def get_valuation_data(self, code, start_date=None, end_date=None, limit=None, offset=0):
+    def get_valuation_data(self, code, start_date=None, end_date=None, limit=None, offset=0, auto_refresh=True):
         limit = self._normalize_limit(limit)
         offset = self._normalize_offset(offset)
         with self._get_connection() as conn:
-            return storage_get_valuation_data(conn, code, start_date, end_date, limit, offset)
+            data = storage_get_valuation_data(conn, code, start_date, end_date, limit, offset)
 
-    def get_technical_data(self, code, start_date=None, end_date=None, limit=None, offset=0):
+        if auto_refresh and offset == 0 and (not data or self._should_auto_refresh(code, 'daily')):
+            try:
+                self.update_stock(code, days=250, delay=0, force=not data)
+                with self._get_connection() as conn:
+                    data = storage_get_valuation_data(conn, code, start_date, end_date, limit, offset)
+            except Exception:
+                pass
+
+        return data
+
+    def get_technical_data(self, code, start_date=None, end_date=None, limit=None, offset=0, auto_refresh=True):
         limit = self._normalize_limit(limit)
         offset = self._normalize_offset(offset)
         with self._get_connection() as conn:
-            return storage_get_technical_data(conn, code, start_date, end_date, limit, offset)
+            data = storage_get_technical_data(conn, code, start_date, end_date, limit, offset)
+
+        if auto_refresh and offset == 0 and (not data or self._should_auto_refresh(code, 'daily')):
+            try:
+                self.update_stock(code, days=250, delay=0, force=not data)
+                with self._get_connection() as conn:
+                    data = storage_get_technical_data(conn, code, start_date, end_date, limit, offset)
+            except Exception:
+                pass
+
+        return data
 
     def get_fund_flow(self, code, start_date=None, end_date=None, limit=None, offset=0):
         limit = self._normalize_limit(limit)
@@ -1261,6 +1353,41 @@ class StockPoolServer:
         else:
             return create_error_response(message=f"未找到股票 {code} 的信息", error_code="DATA_NOT_FOUND", suggested_action="调用 update_stock 更新数据")
 
+    def _handle_get_stock_detail(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        code = arguments.get('code')
+        if not code:
+            raise ValidationError("缺少股票代码", field='code')
+        include_realtime = arguments.get('include_realtime', True)
+        fund_flow_days = arguments.get('fund_flow_days', 10)
+
+        info = self.get_stock_info(code, auto_refresh=True)
+        latest_list = self.get_latest_data([code], include_realtime=include_realtime)
+        latest = latest_list[0] if latest_list else None
+        fund_flow = self.analyze_main_force(code, days=fund_flow_days)
+
+        result = {
+            'code': code,
+            'info': info,
+            'latest': latest,
+        }
+
+        if fund_flow.get('success'):
+            result['fund_flow'] = {
+                'trend': fund_flow.get('trend'),
+                'strength': fund_flow.get('strength'),
+                'total_main_inflow': fund_flow.get('total_main_inflow'),
+                'avg_main_inflow_pct': fund_flow.get('avg_main_inflow_pct'),
+                'positive_days': fund_flow.get('positive_days'),
+                'negative_days': fund_flow.get('negative_days'),
+                'consecutive_inflow': fund_flow.get('consecutive_inflow'),
+                'consecutive_outflow': fund_flow.get('consecutive_outflow'),
+                'latest_date': fund_flow.get('latest_date'),
+                'latest_main_inflow': fund_flow.get('latest_main_inflow'),
+                'latest_main_inflow_pct': fund_flow.get('latest_main_inflow_pct'),
+            }
+
+        return create_success_response(result)
+
     def _handle_analyze_intraday(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
         if not code:
@@ -1440,6 +1567,7 @@ class StockPoolServer:
             'get_technical_indicators': self._handle_get_technical_indicators,
             'get_latest_data': self._handle_get_latest_data,
             'get_stock_info': self._handle_get_stock_info,
+            'get_stock_detail': self._handle_get_stock_detail,
             'analyze_intraday': self._handle_analyze_intraday,
             'analyze_main_force': self._handle_analyze_main_force,
             'screen_market': self._handle_screen_market,
@@ -1457,7 +1585,7 @@ class StockPoolServer:
             return create_error_response(message=f"未知工具: {name}", error_code="UNKNOWN_TOOL")
 
         try:
-            return handler(arguments or {})
+            return _sanitize_for_agent(handler(arguments or {}))
         except ValidationError as e:
             return e.to_dict()
         except DataNotFoundError as e:

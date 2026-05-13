@@ -506,6 +506,19 @@ TOOLS = [
             "required": ["code"]
         }
     },
+    {
+        "name": "get_stock_detail",
+        "description": "查询指定股票的综合详情，包括基本信息、最新行情和主力资金动向。一次调用获取完整画像，避免多次查询。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "股票代码"},
+                "include_realtime": {"type": "boolean", "description": "包含实时行情", "default": True},
+                "fund_flow_days": {"type": "integer", "description": "主力资金分析天数", "default": 10}
+            },
+            "required": ["code"]
+        }
+    },
 
     # ==================== 日内分析工具 ====================
     {
