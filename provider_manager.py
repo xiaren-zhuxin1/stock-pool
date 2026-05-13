@@ -197,11 +197,18 @@ class ProviderManager:
                 method = getattr(provider, method_name)
                 result = method(**kwargs)
                 if result.success:
-                    if result.data is not None:
+                    if result.data is not None and result.data != [] and result.data != {}:
                         self._set_cache(cache_key, result.data)
-                    result.fallback_chain = fallback_chain
-                    result.fallback_used = len(fallback_chain) > 1
-                    return result
+                        result.fallback_chain = fallback_chain
+                        result.fallback_used = len(fallback_chain) > 1
+                        return result
+                    elif result.data == [] or result.data == {}:
+                        _log(f"[ProviderManager] {provider.display_name} 返回空数据，继续降级")
+                    else:
+                        self._set_cache(cache_key, result.data)
+                        result.fallback_chain = fallback_chain
+                        result.fallback_used = len(fallback_chain) > 1
+                        return result
                 else:
                     last_error = result.error
                     _log(f"[ProviderManager] {provider.display_name} 失败: {result.error.message if result.error else 'Unknown'}")

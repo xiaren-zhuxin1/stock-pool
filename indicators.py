@@ -1,5 +1,5 @@
 import math
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 def ema(previous: Optional[float], value: float, period: int) -> float:
@@ -148,3 +148,237 @@ def calculate_technical_indicators(
         })
 
     return result
+
+
+def calculate_returns(closes: List[float]) -> Dict[str, Any]:
+    if len(closes) < 2:
+        return {}
+    returns = [(closes[i] - closes[i - 1]) / closes[i - 1] for i in range(1, len(closes))]
+    total_return = (closes[-1] - closes[0]) / closes[0] * 100
+    avg_daily = sum(returns) / len(returns) * 100
+    variance = sum((r - sum(returns) / len(returns)) ** 2 for r in returns) / len(returns)
+    daily_vol = math.sqrt(variance) * 100
+    annual_vol = daily_vol * math.sqrt(252)
+    neg_returns = [r for r in returns if r < 0]
+    downside_vol = math.sqrt(sum(r ** 2 for r in neg_returns) / len(neg_returns)) * 100 if neg_returns else 0
+    annual_downside_vol = downside_vol * math.sqrt(252)
+    risk_free = 0.015
+    annual_return = avg_daily * 252 / 100
+    sharpe = (annual_return - risk_free) / (annual_vol / 100) if annual_vol > 0 else 0
+    sortino = (annual_return - risk_free) / (annual_downside_vol / 100) if annual_downside_vol > 0 else 0
+    max_drawdown = 0.0
+    peak = closes[0]
+    for c in closes:
+        if c > peak:
+            peak = c
+        dd = (peak - c) / peak
+        if dd > max_drawdown:
+            max_drawdown = dd
+    calmar = annual_return / max_drawdown if max_drawdown > 0 else 0
+    win_days = sum(1 for r in returns if r > 0)
+    win_rate = win_days / len(returns) * 100 if returns else 0
+    avg_win = sum(r for r in returns if r > 0) / win_days * 100 if win_days > 0 else 0
+    avg_loss = sum(r for r in returns if r < 0) / (len(returns) - win_days) * 100 if win_days < len(returns) else 0
+    profit_loss_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else float('inf')
+    return {
+        'total_return_pct': round(total_return, 2),
+        'annual_return_pct': round(annual_return * 100, 2),
+        'daily_volatility_pct': round(daily_vol, 4),
+        'annual_volatility_pct': round(annual_vol, 2),
+        'sharpe_ratio': round(sharpe, 3),
+        'sortino_ratio': round(sortino, 3),
+        'calmar_ratio': round(calmar, 3),
+        'max_drawdown_pct': round(max_drawdown * 100, 2),
+        'win_rate_pct': round(win_rate, 1),
+        'profit_loss_ratio': round(profit_loss_ratio, 2),
+        'avg_daily_return_pct': round(avg_daily, 4),
+    }
+
+
+def calculate_volume_analysis(volumes: List[float], closes: List[float]) -> Dict[str, Any]:
+    if len(volumes) < 2 or len(closes) < 2:
+        return {}
+    avg_vol_5 = sum(volumes[-5:]) / min(5, len(volumes)) if len(volumes) >= 5 else sum(volumes) / len(volumes)
+    avg_vol_20 = sum(volumes[-20:]) / min(20, len(volumes)) if len(volumes) >= 20 else sum(volumes) / len(volumes)
+    vol_ratio = volumes[-1] / avg_vol_5 if avg_vol_5 > 0 else 0
+    obv = 0.0
+    for i in range(1, len(closes)):
+        if closes[i] > closes[i - 1]:
+            obv += volumes[i]
+        elif closes[i] < closes[i - 1]:
+            obv -= volumes[i]
+    vol_price_corr = 0.0
+    if len(volumes) >= 20:
+        recent_v = volumes[-20:]
+        recent_c = closes[-20:]
+        v_mean = sum(recent_v) / len(recent_v)
+        c_mean = sum(recent_c) / len(recent_c)
+        cov = sum((recent_v[i] - v_mean) * (recent_c[i] - c_mean) for i in range(len(recent_v)))
+        v_std = math.sqrt(sum((x - v_mean) ** 2 for x in recent_v))
+        c_std = math.sqrt(sum((x - c_mean) ** 2 for x in recent_c))
+        vol_price_corr = cov / (v_std * c_std) if v_std > 0 and c_std > 0 else 0
+    return {
+        'current_volume': volumes[-1],
+        'avg_volume_5d': round(avg_vol_5, 0),
+        'avg_volume_20d': round(avg_vol_20, 0),
+        'volume_ratio': round(vol_ratio, 2),
+        'obv': round(obv, 0),
+        'vol_price_correlation': round(vol_price_corr, 3),
+    }
+
+
+def generate_technical_signals(indicators: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not indicators or len(indicators) < 2:
+        return {'signals': [], 'overall': 'neutral', 'score': 50}
+    latest = indicators[-1]
+    prev = indicators[-2] if len(indicators) > 1 else {}
+    signals = []
+    score = 50
+    close = latest.get('ma5')
+    if close is None:
+        return {'signals': [], 'overall': 'neutral', 'score': 50}
+
+    ma5 = latest.get('ma5')
+    ma10 = latest.get('ma10')
+    ma20 = latest.get('ma20')
+    ma60 = latest.get('ma60')
+    if ma5 and ma10 and ma20:
+        if ma5 > ma10 > ma20:
+            signals.append({'name': '均线多头排列', 'type': 'bullish', 'desc': 'MA5>MA10>MA20，多头趋势'})
+            score += 15
+        elif ma5 < ma10 < ma20:
+            signals.append({'name': '均线空头排列', 'type': 'bearish', 'desc': 'MA5<MA10<MA20，空头趋势'})
+            score -= 15
+    if ma5 and prev.get('ma5') and ma10 and prev.get('ma10'):
+        if prev.get('ma5', 0) < prev.get('ma10', 0) and ma5 > ma10:
+            signals.append({'name': '金叉(MA5上穿MA10)', 'type': 'bullish', 'desc': '短期均线上穿中期均线'})
+            score += 10
+        elif prev.get('ma5', 0) > prev.get('ma10', 0) and ma5 < ma10:
+            signals.append({'name': '死叉(MA5下穿MA10)', 'type': 'bearish', 'desc': '短期均线下穿中期均线'})
+            score -= 10
+
+    macd = latest.get('macd')
+    macd_signal = latest.get('macd_signal')
+    macd_hist = latest.get('macd_hist')
+    prev_hist = prev.get('macd_hist')
+    if macd_hist is not None:
+        if macd_hist > 0:
+            signals.append({'name': 'MACD红柱', 'type': 'bullish', 'desc': 'MACD柱线为正'})
+            score += 5
+        else:
+            signals.append({'name': 'MACD绿柱', 'type': 'bearish', 'desc': 'MACD柱线为负'})
+            score -= 5
+        if prev_hist is not None and macd_hist > prev_hist:
+            signals.append({'name': 'MACD柱线放大', 'type': 'bullish', 'desc': 'MACD柱线较前日增大'})
+            score += 5
+        elif prev_hist is not None and macd_hist < prev_hist:
+            signals.append({'name': 'MACD柱线缩小', 'type': 'bearish', 'desc': 'MACD柱线较前日减小'})
+            score -= 3
+    if macd is not None and macd_signal is not None and prev.get('macd') is not None and prev.get('macd_signal') is not None:
+        if prev.get('macd', 0) < prev.get('macd_signal', 0) and macd > macd_signal:
+            signals.append({'name': 'MACD金叉', 'type': 'bullish', 'desc': 'DIF上穿DEA'})
+            score += 10
+        elif prev.get('macd', 0) > prev.get('macd_signal', 0) and macd < macd_signal:
+            signals.append({'name': 'MACD死叉', 'type': 'bearish', 'desc': 'DIF下穿DEA'})
+            score -= 10
+
+    rsi_6 = latest.get('rsi_6')
+    rsi_12 = latest.get('rsi_12')
+    if rsi_6 is not None:
+        if rsi_6 > 80:
+            signals.append({'name': 'RSI6超买', 'type': 'bearish', 'desc': f'RSI6={rsi_6:.1f}>80'})
+            score -= 10
+        elif rsi_6 < 20:
+            signals.append({'name': 'RSI6超卖', 'type': 'bullish', 'desc': f'RSI6={rsi_6:.1f}<20'})
+            score += 10
+
+    kdj_k = latest.get('kdj_k')
+    kdj_d = latest.get('kdj_d')
+    kdj_j = latest.get('kdj_j')
+    if kdj_j is not None:
+        if kdj_j > 100:
+            signals.append({'name': 'KDJ超买', 'type': 'bearish', 'desc': f'J值={kdj_j:.1f}>100'})
+            score -= 8
+        elif kdj_j < 0:
+            signals.append({'name': 'KDJ超卖', 'type': 'bullish', 'desc': f'J值={kdj_j:.1f}<0'})
+            score += 8
+    if kdj_k is not None and kdj_d is not None and prev.get('kdj_k') is not None and prev.get('kdj_d') is not None:
+        if prev.get('kdj_k', 0) < prev.get('kdj_d', 0) and kdj_k > kdj_d:
+            signals.append({'name': 'KDJ金叉', 'type': 'bullish', 'desc': 'K线上穿D线'})
+            score += 8
+        elif prev.get('kdj_k', 0) > prev.get('kdj_d', 0) and kdj_k < kdj_d:
+            signals.append({'name': 'KDJ死叉', 'type': 'bearish', 'desc': 'K线下穿D线'})
+            score -= 8
+
+    boll_upper = latest.get('boll_upper')
+    boll_lower = latest.get('boll_lower')
+    boll_mid = latest.get('boll_mid')
+    if boll_upper and boll_lower and boll_mid:
+        current_close = None
+        for key in ['close', 'ma5']:
+            if latest.get(key):
+                current_close = latest[key]
+                break
+        if current_close:
+            if current_close > boll_upper:
+                signals.append({'name': '突破布林上轨', 'type': 'bearish', 'desc': '价格突破布林上轨，可能回调'})
+                score -= 5
+            elif current_close < boll_lower:
+                signals.append({'name': '跌破布林下轨', 'type': 'bullish', 'desc': '价格跌破布林下轨，可能反弹'})
+                score += 5
+
+    position = latest.get('position_pct')
+    if position is not None:
+        if position < 20:
+            signals.append({'name': '52周低位', 'type': 'bullish', 'desc': f'52周位置={position:.1f}%，处于低位'})
+            score += 10
+        elif position > 80:
+            signals.append({'name': '52周高位', 'type': 'bearish', 'desc': f'52周位置={position:.1f}%，处于高位'})
+            score -= 10
+
+    score = max(0, min(100, score))
+    if score >= 70:
+        overall = 'bullish'
+    elif score <= 30:
+        overall = 'bearish'
+    else:
+        overall = 'neutral'
+
+    return {
+        'signals': signals,
+        'score': score,
+        'overall': overall,
+        'bullish_count': sum(1 for s in signals if s['type'] == 'bullish'),
+        'bearish_count': sum(1 for s in signals if s['type'] == 'bearish'),
+    }
+
+
+def calculate_support_resistance(highs: List[float], lows: List[float], closes: List[float]) -> Dict[str, Any]:
+    if len(closes) < 20:
+        return {}
+    recent_highs = highs[-20:]
+    recent_lows = lows[-20:]
+    current = closes[-1]
+    resistance_levels = sorted(set(recent_highs), reverse=True)[:3]
+    support_levels = sorted(set(recent_lows))[:3]
+    nearest_resistance = None
+    for r in resistance_levels:
+        if r > current:
+            nearest_resistance = r
+            break
+    nearest_support = None
+    for s in reversed(support_levels):
+        if s < current:
+            nearest_support = s
+            break
+    res_distance = (nearest_resistance - current) / current * 100 if nearest_resistance else None
+    sup_distance = (current - nearest_support) / current * 100 if nearest_support else None
+    return {
+        'current_price': current,
+        'nearest_resistance': nearest_resistance,
+        'nearest_support': nearest_support,
+        'resistance_distance_pct': round(res_distance, 2) if res_distance else None,
+        'support_distance_pct': round(sup_distance, 2) if sup_distance else None,
+        'resistance_levels': resistance_levels,
+        'support_levels': support_levels,
+    }

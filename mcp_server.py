@@ -49,7 +49,7 @@ from minute_data import (
     seconds_until_intraday_data,
     intraday_resolution,
 )
-from indicators import calculate_ma, calculate_technical_indicators, ema, rsi
+from indicators import calculate_ma, calculate_technical_indicators, ema, rsi, calculate_returns, calculate_volume_analysis, generate_technical_signals, calculate_support_resistance
 from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
 
 
@@ -61,7 +61,7 @@ def _log(*args, **kwargs):
 _SANITIZE_DROP = object()
 _SANITIZE_KEY_MAP = {
     'cache_used': _SANITIZE_DROP,
-    'no_cached_snapshot': 'missing_data',
+    'no_cached_snapshot': _SANITIZE_DROP,
     'refresh_attempted': _SANITIZE_DROP,
     'refresh_result': _SANITIZE_DROP,
     'skipped': _SANITIZE_DROP,
@@ -77,6 +77,17 @@ _SANITIZE_KEY_MAP = {
     'missing_fields': _SANITIZE_DROP,
     'data_quality': _SANITIZE_DROP,
     'data_source': _SANITIZE_DROP,
+    'realtime_skipped': _SANITIZE_DROP,
+    'time_context': _SANITIZE_DROP,
+    'kline_updated': _SANITIZE_DROP,
+    'valuation_updated': _SANITIZE_DROP,
+    'metadata': _SANITIZE_DROP,
+    'provider': _SANITIZE_DROP,
+    'fallback_used': _SANITIZE_DROP,
+    'fallback_chain': _SANITIZE_DROP,
+    'created_at': _SANITIZE_DROP,
+    'updated_at': _SANITIZE_DROP,
+    'finished_at': _SANITIZE_DROP,
 }
 _SANITIZE_VALUE_MAP = {
     'cache': 'historical_close',
@@ -411,10 +422,11 @@ class StockPoolServer:
         if not result.success:
             return None
         fund_flow_items = result.data
-        if fund_flow_items:
-            with self._get_connection() as conn:
-                saved = storage_save_fund_flow_data(conn, code, fund_flow_items)
-            _log(f"  资金流向: {saved} 条 [来源: {result.provider_name}]")
+        if not fund_flow_items:
+            return None
+        with self._get_connection() as conn:
+            saved = storage_save_fund_flow_data(conn, code, fund_flow_items)
+        _log(f"  资金流向: {saved} 条")
         return fund_flow_items
 
     def _fetch_and_save_minute_data(self, code: str, klt: int = 5, days: int = 5, force: bool = False,
@@ -591,11 +603,21 @@ class StockPoolServer:
 
         return data
 
-    def get_fund_flow(self, code, start_date=None, end_date=None, limit=None, offset=0):
+    def get_fund_flow(self, code, start_date=None, end_date=None, limit=None, offset=0, auto_refresh=True):
         limit = self._normalize_limit(limit)
         offset = self._normalize_offset(offset)
         with self._get_connection() as conn:
-            return storage_get_fund_flow_data(conn, code, start_date, end_date, limit, offset)
+            data = storage_get_fund_flow_data(conn, code, start_date, end_date, limit, offset)
+
+        if auto_refresh and offset == 0 and (not data or self._should_auto_refresh(code, 'fund_flow')):
+            try:
+                self._fetch_and_save_fund_flow(code, 100)
+                with self._get_connection() as conn:
+                    data = storage_get_fund_flow_data(conn, code, start_date, end_date, limit, offset)
+            except Exception:
+                pass
+
+        return data
 
     def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0):
         with self._get_connection() as conn:
@@ -1087,30 +1109,56 @@ class StockPoolServer:
 
     # ==================== MCP Tool Handlers ====================
 
+    @staticmethod
+    def _make_data_error(code, result, data_label='数据'):
+        from providers.base import ErrorType
+        err = result.error
+        err_type = err.error_type if err else ErrorType.UNKNOWN
+        err_msg = err.message if err else '未知错误'
+
+        if err_type in (ErrorType.AUTH_ERROR, ErrorType.INVALID_PARAMS):
+            return create_error_response(
+                message=f"股票代码 {code} 无效或不存在，无法获取{data_label}",
+                error_code='INVALID_CODE',
+                recoverable=False,
+                suggested_action=f"请检查股票代码 {code} 是否正确",
+            )
+
+        if err_type == ErrorType.RATE_LIMITED:
+            return create_error_response(
+                message=f"获取{data_label}时API限流，请5分钟后重试",
+                error_code='RATE_LIMITED',
+                recoverable=True,
+                suggested_action="等待5分钟后重试",
+            )
+
+        if err_type in (ErrorType.CONNECTION_ERROR, ErrorType.TIMEOUT):
+            return create_error_response(
+                message=f"网络异常，无法获取{data_label}。请稍后重试",
+                error_code='NETWORK_ERROR',
+                recoverable=True,
+                suggested_action="检查网络连接后重试",
+            )
+
+        return create_error_response(
+            message=f"获取{data_label}失败: {err_msg}",
+            error_code=err_type.value if err else 'UNKNOWN',
+            recoverable=True,
+            suggested_action="稍后重试，或尝试其他股票",
+        )
+
     def _handle_get_current_time(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return create_success_response(self.get_current_time_info())
-
-    def _handle_get_provider_status(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        return create_success_response(self.provider_manager.get_status())
 
     def _handle_get_realtime_quote(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
         if not code:
             raise ValidationError("缺少股票代码", field='code')
-        providers = arguments.get('providers')
-        result = self.provider_manager.fetch_realtime(code, providers)
+        result = self.provider_manager.fetch_realtime(code)
         if result.success:
-            return create_success_response(result.data, metadata={
-                'provider': result.provider_name,
-                'fallback_used': result.fallback_used,
-                'fallback_chain': result.fallback_chain,
-            })
+            return create_success_response(result.data)
         else:
-            return create_error_response(
-                message=result.error.message, error_code=result.error.error_type.value,
-                details={'provider': result.provider_name, 'fallback_chain': result.fallback_chain},
-                suggested_action="尝试其他数据源或稍后重试",
-            )
+            return self._make_data_error(code, result, '实时行情')
 
     def _handle_get_realtime_quotes(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         codes = arguments.get('codes', [])
@@ -1118,8 +1166,7 @@ class StockPoolServer:
             raise ValidationError("缺少股票代码列表", field='codes')
         if len(codes) > 20:
             raise ValidationError("单次最多20只股票", field='codes', value=len(codes))
-        delay = arguments.get('delay', 0.2)
-        results = self.get_realtime_prices(codes, delay)
+        results = self.get_realtime_prices(codes, 0.2)
         return create_success_response(results)
 
     def _handle_get_daily_kline(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1128,25 +1175,34 @@ class StockPoolServer:
             raise ValidationError("缺少股票代码", field='code')
         start_date = arguments.get('start_date')
         end_date = arguments.get('end_date')
-        limit = arguments.get('limit')
-        offset = arguments.get('offset', 0)
-        include_realtime = arguments.get('include_realtime', True)
+        days = arguments.get('days', 250)
 
-        data = self.get_daily_data(code, start_date, end_date, limit, offset, include_realtime)
-        return create_success_response(data, metadata={'count': len(data)})
+        data = self.get_daily_data(code, start_date, end_date, limit=days)
+        if not data:
+            return create_error_response(
+                message=f"未获取到 {code} 的日K线数据",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查股票代码是否正确，或稍后重试",
+            )
+        return create_success_response(data)
 
     def _handle_get_minute_kline(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
         if not code:
             raise ValidationError("缺少股票代码", field='code')
         klt = arguments.get('klt', 5)
-        start_time = arguments.get('start_time')
-        end_time = arguments.get('end_time')
-        limit = arguments.get('limit')
-        offset = arguments.get('offset', 0)
+        days = arguments.get('days', 5)
 
-        data = self.get_minute_data(code, klt, start_time, end_time, limit, offset)
-        return create_success_response(data, metadata={'klt': klt, 'count': len(data)})
+        data = self.get_minute_data(code, klt, days=days)
+        if not data:
+            return create_error_response(
+                message=f"未获取到 {code} 的分钟K线数据",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="非交易时段无分钟数据，请在交易时间重试",
+            )
+        return create_success_response(data)
 
     def _handle_get_valuation(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -1155,10 +1211,16 @@ class StockPoolServer:
         start_date = arguments.get('start_date')
         end_date = arguments.get('end_date')
         limit = arguments.get('limit')
-        offset = arguments.get('offset', 0)
 
-        data = self.get_valuation_data(code, start_date, end_date, limit, offset)
-        return create_success_response(data, metadata={'count': len(data)})
+        data = self.get_valuation_data(code, start_date, end_date, limit)
+        if not data:
+            return create_error_response(
+                message=f"未获取到 {code} 的估值数据",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查股票代码是否正确，或稍后重试",
+            )
+        return create_success_response(data)
 
     def _handle_get_fund_flow(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -1167,41 +1229,28 @@ class StockPoolServer:
         start_date = arguments.get('start_date')
         end_date = arguments.get('end_date')
         limit = arguments.get('limit')
-        offset = arguments.get('offset', 0)
 
-        data = self.get_fund_flow(code, start_date, end_date, limit, offset)
-        return create_success_response(data, metadata={'count': len(data)})
+        data = self.get_fund_flow(code, start_date, end_date, limit)
+        if not data:
+            return create_error_response(
+                message=f"未获取到 {code} 的资金流向数据。该股票可能暂无资金流向记录",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查股票代码是否正确。部分小盘股/新股可能无资金流向数据",
+            )
+        return create_success_response(data)
 
     def _handle_get_stock_list(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         board = arguments.get('board', 'a_share')
-        providers = arguments.get('providers')
-        result = self.provider_manager.fetch_stock_list(board, providers)
-        if result.success:
-            stocks = result.data
-            codes = [s['code'] for s in stocks]
-            return create_success_response(
-                {'stocks': stocks, 'codes': codes, 'total': len(stocks)},
-                metadata={'provider': result.provider_name, 'board': board},
-            )
-        else:
-            return create_error_response(message=result.error.message, error_code=result.error.error_type.value)
-
-    def _handle_get_stock_universe(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        board = arguments.get('board', 'a_share')
         page = arguments.get('page')
         page_size = arguments.get('page_size', 100)
-        limit = arguments.get('limit')
 
         result = self.provider_manager.fetch_stock_list(board)
         if not result.success:
-            return create_error_response(message=result.error.message, error_code=result.error.error_type.value)
+            return self._make_data_error(board, result, '股票列表')
 
         stocks = result.data
-        if limit and not page:
-            stocks = stocks[:limit]
-            return create_success_response({
-                'stocks': stocks, 'total': len(stocks), 'board': board,
-            }, metadata={'provider': result.provider_name})
+        codes = [s['code'] for s in stocks]
 
         if page:
             page = max(1, page)
@@ -1209,105 +1258,28 @@ class StockPoolServer:
             start = (page - 1) * page_size
             end = start + page_size
             page_stocks = stocks[start:end]
+            page_codes = codes[start:end]
             return create_success_response({
-                'stocks': page_stocks,
-                'total': len(stocks),
-                'board': board,
-                'page': page,
+                'stocks': page_stocks, 'codes': page_codes,
+                'total': len(stocks), 'page': page,
                 'page_size': page_size,
                 'total_pages': (len(stocks) + page_size - 1) // page_size,
-            }, metadata={'provider': result.provider_name})
+            })
 
         return create_success_response({
-            'stocks': stocks, 'total': len(stocks), 'board': board,
-        }, metadata={'provider': result.provider_name})
-
-    def _handle_get_all_stocks(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        board = arguments.get('board', 'a_share')
-        result = self.provider_manager.fetch_stock_list(board)
-        if not result.success:
-            return create_error_response(message=result.error.message, error_code=result.error.error_type.value)
-        stocks = result.data
-        return create_success_response({
-            'stocks': stocks, 'total': len(stocks), 'board': board,
-        }, metadata={'provider': result.provider_name})
+            'stocks': stocks, 'codes': codes, 'total': len(stocks),
+        })
 
     def _handle_get_financial_data(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
         if not code:
             raise ValidationError("缺少股票代码", field='code')
         report_type = arguments.get('report_type', 'income')
-        providers = arguments.get('providers')
-        result = self.provider_manager.fetch_financial(code, report_type, providers)
+        result = self.provider_manager.fetch_financial(code, report_type)
         if result.success:
-            return create_success_response(result.data, metadata={'provider': result.provider_name, 'report_type': report_type})
+            return create_success_response(result.data)
         else:
-            return create_error_response(message=result.error.message, error_code=result.error.error_type.value, suggested_action="TuShare需要配置Token，或使用AkShare")
-
-    def _handle_update_stock(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        days = arguments.get('days', 250)
-        force = arguments.get('force', False)
-        result = self.update_stock(code, days, delay=0, force=force)
-        return create_success_response(result, message=f"已更新 {code}")
-
-    def _handle_update_stocks(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        codes = arguments.get('codes', [])
-        if not codes:
-            raise ValidationError("缺少股票代码列表", field='codes')
-        if len(codes) > 50:
-            raise ValidationError("单次最多50只股票", field='codes', value=len(codes))
-        days = arguments.get('days', 250)
-        force = arguments.get('force', False)
-
-        if len(codes) > 10:
-            job_id = f"update_{int(time.time())}"
-            now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            job = {
-                'job_id': job_id, 'status': 'running',
-                'args': {'codes': codes, 'days': days, 'force': force},
-                'progress': {'completed': 0, 'total': len(codes)},
-                'result': None, 'error': None,
-                'created_at': now_text, 'updated_at': now_text,
-            }
-            self.sync_jobs.save(job)
-
-            def _run_batch():
-                results = {}
-                for code in codes:
-                    try:
-                        r = self.update_stock(code, days, delay=0.5, force=force)
-                        results[code] = 'success' if r.get('success') else 'failed'
-                    except Exception as e:
-                        results[code] = str(e)
-                    self.sync_jobs.update(job_id,
-                        progress={'completed': len(results), 'total': len(codes)},
-                        updated_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    )
-                self.sync_jobs.update(job_id,
-                    status='completed',
-                    result=results,
-                    finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                )
-
-            worker = threading.Thread(target=_run_batch, daemon=True)
-            worker.start()
-            return create_success_response({
-                'job_id': job_id,
-                'status': 'running',
-                'message': f'批量更新已启动({len(codes)}只)，使用 get_sync_status(job_id="{job_id}") 查询进度',
-            })
-
-        results = {}
-        for code in codes:
-            try:
-                r = self.update_stock(code, days, delay=0.5, force=force)
-                results[code] = 'success' if r.get('success') else 'failed'
-            except Exception as e:
-                results[code] = str(e)
-        return create_success_response({'results': results})
+            return self._make_data_error(code, result, '财务数据')
 
     def _handle_analyze_position(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         codes = arguments.get('codes', [])
@@ -1328,8 +1300,98 @@ class StockPoolServer:
 
         data = self.get_technical_data(code, start_date, end_date, limit)
         if not data:
-            return create_error_response(message="无技术指标数据，请先调用 update_stock", error_code="DATA_NOT_FOUND", suggested_action="调用 update_stock 更新数据")
+            return create_error_response(
+                message=f"未获取到 {code} 的技术指标数据",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查股票代码是否正确，或稍后重试",
+            )
         return create_success_response(data[-50:] if len(data) > 50 else data)
+
+    def _handle_analyze_stock(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        code = arguments.get('code')
+        if not code:
+            raise ValidationError("缺少股票代码", field='code')
+        fund_flow_days = arguments.get('fund_flow_days', 10)
+
+        indicators = self.get_technical_data(code)
+        if not indicators:
+            return create_error_response(
+                message=f"未获取到 {code} 的技术指标数据，无法进行分析",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查股票代码是否正确，或稍后重试",
+            )
+
+        kline_data = self.get_daily_data(code)
+        if not kline_data:
+            return create_error_response(
+                message=f"未获取到 {code} 的K线数据，无法进行分析",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查股票代码是否正确，或稍后重试",
+            )
+
+        kline_sorted = sorted(kline_data, key=lambda x: x.get('date', ''))
+        closes = [float(r['close']) for r in kline_sorted if r.get('close')]
+        highs = [float(r['high']) for r in kline_sorted if r.get('high')]
+        lows = [float(r['low']) for r in kline_sorted if r.get('low')]
+        volumes = [float(r.get('volume') or 0) for r in kline_sorted]
+
+        tech_signals = generate_technical_signals(indicators)
+        returns_analysis = calculate_returns(closes)
+        volume_analysis = calculate_volume_analysis(volumes, closes)
+        support_resistance = calculate_support_resistance(highs, lows, closes)
+
+        fund_flow_result = self.analyze_main_force(code, days=fund_flow_days)
+        fund_flow_summary = None
+        if fund_flow_result.get('success'):
+            fund_flow_summary = {
+                'trend': fund_flow_result.get('trend'),
+                'strength': fund_flow_result.get('strength'),
+                'total_main_inflow': fund_flow_result.get('total_main_inflow'),
+                'consecutive_inflow': fund_flow_result.get('consecutive_inflow'),
+                'consecutive_outflow': fund_flow_result.get('consecutive_outflow'),
+                'latest_main_inflow_pct': fund_flow_result.get('latest_main_inflow_pct'),
+            }
+
+        valuation_data = self.get_valuation_data(code)
+        valuation_summary = None
+        if valuation_data:
+            latest_val = valuation_data[-1] if valuation_data else {}
+            pe_ttm = latest_val.get('pe_ttm')
+            pb = latest_val.get('pb')
+            market_cap = latest_val.get('market_cap')
+            valuation_level = 'unknown'
+            if pe_ttm is not None:
+                if pe_ttm < 0:
+                    valuation_level = 'loss'
+                elif pe_ttm < 15:
+                    valuation_level = 'undervalued'
+                elif pe_ttm < 30:
+                    valuation_level = 'fair'
+                elif pe_ttm < 60:
+                    valuation_level = 'overvalued'
+                else:
+                    valuation_level = 'expensive'
+            valuation_summary = {
+                'pe_ttm': pe_ttm,
+                'pb': pb,
+                'market_cap_yi': round(market_cap / 100000000, 2) if market_cap else None,
+                'valuation_level': valuation_level,
+            }
+
+        result = {
+            'code': code,
+            'technical_signals': tech_signals,
+            'risk_metrics': returns_analysis,
+            'volume_analysis': volume_analysis,
+            'support_resistance': support_resistance,
+            'fund_flow': fund_flow_summary,
+            'valuation': valuation_summary,
+        }
+
+        return create_success_response(result)
 
     def _handle_get_latest_data(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         codes = arguments.get('codes', [])
@@ -1338,20 +1400,15 @@ class StockPoolServer:
         if len(codes) > 30:
             raise ValidationError("单次最多30只股票", field='codes', value=len(codes))
         include_realtime = arguments.get('include_realtime', False)
-        realtime_limit = arguments.get('realtime_limit')
-        batch_size = arguments.get('batch_size', 200)
-        results = self.get_latest_data(codes, include_realtime, realtime_limit, batch_size)
+        results = self.get_latest_data(codes, include_realtime=include_realtime)
+        if not results:
+            return create_error_response(
+                message="未获取到任何股票数据，请检查股票代码是否正确",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查股票代码是否正确",
+            )
         return create_success_response(results)
-
-    def _handle_get_stock_info(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        info = self.get_stock_info(code)
-        if info:
-            return create_success_response(info)
-        else:
-            return create_error_response(message=f"未找到股票 {code} 的信息", error_code="DATA_NOT_FOUND", suggested_action="调用 update_stock 更新数据")
 
     def _handle_get_stock_detail(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -1361,6 +1418,14 @@ class StockPoolServer:
         fund_flow_days = arguments.get('fund_flow_days', 10)
 
         info = self.get_stock_info(code, auto_refresh=True)
+        if not info:
+            return create_error_response(
+                message=f"未找到股票 {code} 的信息，请检查股票代码是否正确",
+                error_code='INVALID_CODE',
+                recoverable=False,
+                suggested_action=f"请确认股票代码 {code} 是否正确",
+            )
+
         latest_list = self.get_latest_data([code], include_realtime=include_realtime)
         latest = latest_list[0] if latest_list else None
         fund_flow = self.analyze_main_force(code, days=fund_flow_days)
@@ -1397,11 +1462,26 @@ class StockPoolServer:
         if result.get('success'):
             return create_success_response(result)
         else:
+            status = result.get('status', 'ANALYSIS_FAILED')
+            msg = result.get('message', '日内分析失败')
+            if status == 'market_closed':
+                return create_error_response(
+                    message=f"市场已关闭，无法获取日内数据。{msg}",
+                    error_code='MARKET_CLOSED',
+                    recoverable=True,
+                    suggested_action="请在交易时间(9:30-15:00)重试",
+                )
+            if status == 'missing_minute_data':
+                return create_error_response(
+                    message=f"缺少分钟数据，无法进行日内分析。{msg}",
+                    error_code='DATA_NOT_FOUND',
+                    recoverable=True,
+                    suggested_action="请在交易时间重试，系统会自动获取分钟数据",
+                )
             return create_error_response(
-                message=result.get('message', '日内分析失败'),
-                error_code=result.get('status', 'ANALYSIS_FAILED'),
-                details=result,
-                suggested_action="先更新分钟数据和日K数据",
+                message=msg,
+                error_code=status,
+                recoverable=True,
             )
 
     def _handle_analyze_main_force(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1413,7 +1493,12 @@ class StockPoolServer:
         if result.get('success'):
             return create_success_response(result)
         else:
-            return create_error_response(message=result.get('error', '主力分析失败'), error_code="DATA_NOT_FOUND", suggested_action="先更新资金流向数据")
+            return create_error_response(
+                message=f"无法分析 {code} 的主力资金动向: {result.get('error', '无资金流向数据')}",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="部分小盘股/新股可能无资金流向数据，请检查股票代码",
+            )
 
     def _handle_screen_market(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self.screen_market(arguments)
@@ -1424,54 +1509,6 @@ class StockPoolServer:
         criteria['offset'] = 0
         return self.screen_market(criteria)
 
-    def _handle_screen_main_board(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        criteria = dict(arguments)
-        criteria.setdefault('board', 'main')
-        return self.screen_market(criteria)
-
-    def _handle_start_market_sync(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        board = arguments.get('board', 'a_share')
-        refresh = arguments.get('refresh', 'stale')
-        days = arguments.get('days', 250)
-        max_codes = arguments.get('max_codes')
-        delay = arguments.get('delay', 0.2)
-
-        job_id = f"sync_{int(time.time())}_{board}"
-        now_text = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        job = {
-            'job_id': job_id, 'status': 'running',
-            'args': {'board': board, 'refresh': refresh, 'days': days, 'max_codes': max_codes},
-            'progress': {'scanned': 0, 'refreshed': 0, 'failed': 0},
-            'result': None, 'error': None,
-            'created_at': now_text, 'updated_at': now_text,
-        }
-        self.sync_jobs.save(job)
-
-        def _run_sync():
-            try:
-                summary = self.sync_market(board, refresh, max_codes, days, delay)
-                self.sync_jobs.update(job_id,
-                    status='completed',
-                    progress=summary,
-                    result=summary,
-                    finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                )
-            except Exception as e:
-                self.sync_jobs.update(job_id,
-                    status='failed',
-                    error=str(e),
-                    finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                )
-
-        worker = threading.Thread(target=_run_sync, daemon=True)
-        worker.start()
-
-        return create_success_response({
-            'job_id': job_id,
-            'status': 'running',
-            'message': f'同步任务已启动，使用 get_sync_status(job_id="{job_id}") 查询进度',
-        })
-
     def _handle_get_sync_status(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         job_id = arguments.get('job_id')
         limit = arguments.get('limit', 20)
@@ -1481,74 +1518,16 @@ class StockPoolServer:
             if job:
                 return create_success_response(job)
             else:
-                return create_error_response(message=f"未找到任务 {job_id}", error_code="NOT_FOUND")
+                return create_error_response(message=f"未找到任务 {job_id}", error_code="NOT_FOUND", recoverable=False)
         else:
             jobs = self.sync_jobs.list(limit, offset)
             return create_success_response(jobs)
-
-    def _handle_cancel_sync(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        job_id = arguments.get('job_id')
-        if not job_id:
-            raise ValidationError("缺少任务ID", field='job_id')
-        job = self.sync_jobs.get(job_id)
-        if not job:
-            return create_error_response(message=f"未找到任务 {job_id}", error_code="NOT_FOUND")
-        if job.get('status') not in ('running', 'pending'):
-            return create_error_response(message=f"任务 {job_id} 状态为 {job.get('status')}，无法取消", error_code="INVALID_STATE")
-        self.sync_jobs.update(job_id, status='cancelled', finished_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        return create_success_response({'job_id': job_id, 'status': 'cancelled'})
-
-    def _handle_update_minute_data(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        klt = arguments.get('klt', 5)
-        days = arguments.get('days', 5)
-        force = arguments.get('force', False)
-        start_time = arguments.get('start_time')
-        end_time = arguments.get('end_time')
-        result = self._fetch_and_save_minute_data(code, klt, days, force, start_time, end_time)
-        return create_success_response(result)
-
-    def _handle_check_missing_data(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        codes = arguments.get('codes', [])
-        if not codes:
-            raise ValidationError("缺少股票代码列表", field='codes')
-        start_date = arguments.get('start_date')
-        end_date = arguments.get('end_date')
-        if not start_date or not end_date:
-            raise ValidationError("缺少日期范围", field='start_date/end_date')
-        result = self.check_missing_data(codes, start_date, end_date)
-        return create_success_response(result)
-
-    def _handle_get_db_stats(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        return create_success_response(self.get_db_stats())
-
-    def _handle_update_fund_flow(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        days = arguments.get('days', 100)
-        force = arguments.get('force', False)
-
-        freshness = self.check_data_freshness(code, 'fund_flow')
-        if not force and freshness.get('has_data'):
-            latest_date = freshness.get('latest_date')
-            today = datetime.now().strftime('%Y-%m-%d')
-            if latest_date == today:
-                return create_success_response({'code': code, 'skipped': True, 'reason': '数据已是最新'})
-
-        fund_flow_items = self._fetch_and_save_fund_flow(code, days)
-        if not fund_flow_items:
-            return create_error_response(message="未获取到资金流向数据", error_code="DATA_NOT_FOUND")
-        return create_success_response({'code': code, 'saved': len(fund_flow_items)})
 
     handle_tool_call_handlers = None
 
     def handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         handlers = {
             'get_current_time': self._handle_get_current_time,
-            'get_provider_status': self._handle_get_provider_status,
             'get_realtime_quote': self._handle_get_realtime_quote,
             'get_realtime_quotes': self._handle_get_realtime_quotes,
             'get_daily_kline': self._handle_get_daily_kline,
@@ -1556,33 +1535,27 @@ class StockPoolServer:
             'get_valuation': self._handle_get_valuation,
             'get_fund_flow': self._handle_get_fund_flow,
             'get_stock_list': self._handle_get_stock_list,
-            'get_stock_universe': self._handle_get_stock_universe,
-            'get_all_stocks': self._handle_get_all_stocks,
             'get_financial_data': self._handle_get_financial_data,
-            'update_stock': self._handle_update_stock,
-            'update_stocks': self._handle_update_stocks,
-            'update_minute_data': self._handle_update_minute_data,
-            'update_fund_flow': self._handle_update_fund_flow,
             'analyze_position': self._handle_analyze_position,
             'get_technical_indicators': self._handle_get_technical_indicators,
+            'analyze_stock': self._handle_analyze_stock,
             'get_latest_data': self._handle_get_latest_data,
-            'get_stock_info': self._handle_get_stock_info,
             'get_stock_detail': self._handle_get_stock_detail,
             'analyze_intraday': self._handle_analyze_intraday,
             'analyze_main_force': self._handle_analyze_main_force,
             'screen_market': self._handle_screen_market,
             'screen_all_market': self._handle_screen_all_market,
-            'screen_main_board': self._handle_screen_main_board,
-            'start_market_sync': self._handle_start_market_sync,
             'get_sync_status': self._handle_get_sync_status,
-            'cancel_sync': self._handle_cancel_sync,
-            'check_missing_data': self._handle_check_missing_data,
-            'get_db_stats': self._handle_get_db_stats,
         }
 
         handler = handlers.get(name)
         if not handler:
-            return create_error_response(message=f"未知工具: {name}", error_code="UNKNOWN_TOOL")
+            return create_error_response(
+                message=f"未知工具: {name}",
+                error_code='UNKNOWN_TOOL',
+                recoverable=False,
+                suggested_action="请检查工具名称是否正确",
+            )
 
         try:
             return _sanitize_for_agent(handler(arguments or {}))
