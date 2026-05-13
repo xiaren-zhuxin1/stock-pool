@@ -8,8 +8,11 @@ try:
     )
     from .eastmoney import EastMoneyProvider
     from .sina import SinaProvider
-    from .tushare import TuShareProvider
     from .akshare import AkShareProvider
+    from .tushare import TuShareProvider
+    from .tencent import TencentProvider
+    from .netease import NeteaseProvider
+    from .baostock import BaostockProvider
 except ImportError:
     from base import (
         BaseProvider,
@@ -20,8 +23,11 @@ except ImportError:
     )
     from eastmoney import EastMoneyProvider
     from sina import SinaProvider
-    from tushare import TuShareProvider
     from akshare import AkShareProvider
+    from tushare import TuShareProvider
+    from tencent import TencentProvider
+    from netease import NeteaseProvider
+    from baostock import BaostockProvider
 
 __all__ = [
     'BaseProvider',
@@ -31,6 +37,9 @@ __all__ = [
     'DataType',
     'EastMoneyProvider',
     'SinaProvider',
-    'TuShareProvider',
     'AkShareProvider',
+    'TuShareProvider',
+    'TencentProvider',
+    'NeteaseProvider',
+    'BaostockProvider',
 ]

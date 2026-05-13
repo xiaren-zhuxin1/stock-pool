@@ -1,18 +1,21 @@
 import sys
 import builtins
 import time
+import random
 from abc import ABC, abstractmethod
 from enum import Enum
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
 
 try:
-    builtins.print
-except AttributeError:
-    pass
+    import requests
+    REQUESTS_AVAILABLE = True
+except ImportError:
+    REQUESTS_AVAILABLE = False
 
-def print(*args, **kwargs):
+
+def _log(*args, **kwargs):
     kwargs.setdefault('file', sys.stderr)
     return builtins.print(*args, **kwargs)
 
@@ -54,6 +57,7 @@ class ErrorType(Enum):
     AUTH_ERROR = "auth_error"
     QUOTA_EXCEEDED = "quota_exceeded"
     INVALID_PARAMS = "invalid_params"
+    NOT_SUPPORTED = "not_supported"
     UNKNOWN = "unknown"
 
 
@@ -88,7 +92,7 @@ class ProviderResult:
     fallback_chain: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        result = {
+        result: Dict[str, Any] = {
             'success': self.success,
             'provider': self.provider_name,
             'data_type': self.data_type.value if self.data_type else None,
@@ -124,13 +128,13 @@ class BaseProvider(ABC):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
         self._status = ProviderStatus.AVAILABLE
-        self._error_count = 0
+        self._error_count: int = 0
         self._last_error: Optional[str] = None
         self._last_success: Optional[datetime] = None
         self._rate_limit_reset: Optional[datetime] = None
-        self._max_retries = self.config.get('max_retries', 3)
-        self._retry_delay = self.config.get('retry_delay', 1.0)
-        self._timeout = self.config.get('timeout', 15)
+        self._max_retries: int = self.config.get('max_retries', 3)
+        self._retry_delay: float = self.config.get('retry_delay', 1.0)
+        self._timeout: int = self.config.get('timeout', 15)
 
     @property
     @abstractmethod
@@ -191,26 +195,25 @@ class BaseProvider(ABC):
                 self._rate_limit_reset = None
         return self._status in (ProviderStatus.AVAILABLE, ProviderStatus.DEGRADED)
 
-    def _mark_success(self):
+    def _mark_success(self) -> None:
         self._error_count = 0
         self._last_success = datetime.now()
         if self._status == ProviderStatus.DEGRADED:
             self._status = ProviderStatus.AVAILABLE
 
-    def _mark_error(self, error: ProviderError):
+    def _mark_error(self, error: ProviderError) -> None:
         self._error_count += 1
         self._last_error = error.message
-
         if error.error_type == ErrorType.RATE_LIMITED:
             self._status = ProviderStatus.RATE_LIMITED
             if error.retry_after:
-                self._rate_limit_reset = datetime.now() + error.retry_after
+                self._rate_limit_reset = datetime.now() + timedelta(seconds=error.retry_after)
         elif error.error_type in (ErrorType.AUTH_ERROR, ErrorType.QUOTA_EXCEEDED):
             self._status = ProviderStatus.UNAVAILABLE
         elif self._error_count >= 3:
             self._status = ProviderStatus.DEGRADED
 
-    def _create_error(self, error_type: ErrorType, message: str, 
+    def _create_error(self, error_type: ErrorType, message: str,
                       original_error: Optional[Exception] = None,
                       retry_after: Optional[int] = None) -> ProviderError:
         is_recoverable = error_type not in (ErrorType.AUTH_ERROR, ErrorType.QUOTA_EXCEEDED)
@@ -223,7 +226,7 @@ class BaseProvider(ABC):
             is_recoverable=is_recoverable,
         )
 
-    def _create_result(self, data: Any, data_type: DataType, 
+    def _create_result(self, data: Any, data_type: DataType,
                        metadata: Optional[Dict[str, Any]] = None) -> ProviderResult:
         self._mark_success()
         return ProviderResult(
@@ -234,7 +237,7 @@ class BaseProvider(ABC):
             metadata=metadata or {},
         )
 
-    def _create_error_result(self, error: ProviderError, 
+    def _create_error_result(self, error: ProviderError,
                              data_type: Optional[DataType] = None) -> ProviderResult:
         self._mark_error(error)
         return ProviderResult(
@@ -244,18 +247,88 @@ class BaseProvider(ABC):
             data_type=data_type,
         )
 
+    def _not_supported(self, capability: str, data_type: DataType) -> ProviderResult:
+        return self._create_error_result(
+            self._create_error(
+                ErrorType.NOT_SUPPORTED,
+                f"{self.display_name}不支持{capability}数据",
+            ),
+            data_type,
+        )
+
+    def _http_request(self, url: str, params: Optional[Dict] = None,
+                      headers: Optional[Dict] = None,
+                      data_type: Optional[DataType] = None) -> ProviderResult:
+        if not REQUESTS_AVAILABLE:
+            return self._create_error_result(
+                self._create_error(ErrorType.CONNECTION_ERROR, "requests库未安装"),
+                data_type,
+            )
+        for attempt in range(self._max_retries):
+            try:
+                if attempt > 0:
+                    delay = self._retry_delay * (2 ** attempt) + random.uniform(0, 1)
+                    time.sleep(delay)
+                response = requests.get(
+                    url, params=params, headers=headers,
+                    timeout=self._timeout,
+                )
+                if response.status_code == 200:
+                    return self._create_result(response, data_type or DataType.REALTIME)
+                elif response.status_code == 429:
+                    retry_after = 60 + random.randint(0, 10)
+                    return self._create_error_result(
+                        self._create_error(
+                            ErrorType.RATE_LIMITED,
+                            f"API限流，需等待{retry_after}秒",
+                            retry_after=retry_after,
+                        ),
+                        data_type,
+                    )
+                else:
+                    return self._create_error_result(
+                        self._create_error(
+                            ErrorType.HTTP_ERROR,
+                            f"HTTP错误: {response.status_code}",
+                        ),
+                        data_type,
+                    )
+            except requests.exceptions.Timeout:
+                if attempt < self._max_retries - 1:
+                    continue
+                return self._create_error_result(
+                    self._create_error(ErrorType.TIMEOUT, "请求超时"),
+                    data_type,
+                )
+            except requests.exceptions.ConnectionError as e:
+                if attempt < self._max_retries - 1:
+                    continue
+                return self._create_error_result(
+                    self._create_error(ErrorType.CONNECTION_ERROR, f"连接错误: {e}"),
+                    data_type,
+                )
+            except Exception as e:
+                return self._create_error_result(
+                    self._create_error(ErrorType.UNKNOWN, f"未知错误: {e}"),
+                    data_type,
+                )
+        return self._create_error_result(
+            self._create_error(ErrorType.UNKNOWN, "重试次数耗尽"),
+            data_type,
+        )
+
     @abstractmethod
     def fetch_realtime(self, code: str) -> ProviderResult:
         pass
 
     @abstractmethod
-    def fetch_daily_kline(self, code: str, days: int = 250, 
+    def fetch_daily_kline(self, code: str, days: int = 250,
                           start_date: Optional[str] = None,
                           end_date: Optional[str] = None) -> ProviderResult:
         pass
 
     @abstractmethod
-    def fetch_minute_kline(self, code: str, klt: int = 5, 
+    def fetch_minute_kline(self, code: str, klt: int = 5,
                            days: int = 5) -> ProviderResult:
         pass
 
@@ -272,8 +345,4 @@ class BaseProvider(ABC):
         pass
 
     def fetch_financial(self, code: str, report_type: str = 'income') -> ProviderResult:
-        return self._create_error_result(
-            self._create_error(ErrorType.INVALID_PARAMS, 
-                              f"Provider {self.name} does not support financial data"),
-            DataType.FINANCIAL,
-        )
+        return self._not_supported("财务", DataType.FINANCIAL)

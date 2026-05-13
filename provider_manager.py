@@ -4,6 +4,7 @@ import builtins
 import time
 from typing import Optional, List, Dict, Any, Type
 from datetime import datetime, timedelta
+
 try:
     from .providers.base import (
         BaseProvider, ProviderCapability, ProviderResult, DataType,
@@ -11,8 +12,11 @@ try:
     )
     from .providers.eastmoney import EastMoneyProvider
     from .providers.sina import SinaProvider
-    from .providers.tushare import TuShareProvider
     from .providers.akshare import AkShareProvider
+    from .providers.tushare import TuShareProvider
+    from .providers.tencent import TencentProvider
+    from .providers.netease import NeteaseProvider
+    from .providers.baostock import BaostockProvider
 except ImportError:
     from providers.base import (
         BaseProvider, ProviderCapability, ProviderResult, DataType,
@@ -20,11 +24,14 @@ except ImportError:
     )
     from providers.eastmoney import EastMoneyProvider
     from providers.sina import SinaProvider
-    from providers.tushare import TuShareProvider
     from providers.akshare import AkShareProvider
+    from providers.tushare import TuShareProvider
+    from providers.tencent import TencentProvider
+    from providers.netease import NeteaseProvider
+    from providers.baostock import BaostockProvider
 
 
-def print(*args, **kwargs):
+def _log(*args, **kwargs):
     kwargs.setdefault('file', sys.stderr)
     return builtins.print(*args, **kwargs)
 
@@ -37,34 +44,42 @@ class ProviderManager:
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_ttl: int = self.config.get('cache_ttl', 300)
         self._enable_cache: bool = self.config.get('enable_cache', True)
-        
         self._init_providers()
         self._build_capability_index()
 
-    def _init_providers(self):
+    def _init_providers(self) -> None:
         provider_classes: List[Type[BaseProvider]] = [
             EastMoneyProvider,
             SinaProvider,
             AkShareProvider,
+            TencentProvider,
+            NeteaseProvider,
         ]
-        
+
         tushare_token = os.environ.get('TUSHARE_TOKEN') or self.config.get('tushare_token')
         if tushare_token:
             provider_classes.append(TuShareProvider)
-        
+
+        try:
+            import baostock
+            provider_classes.append(BaostockProvider)
+        except ImportError:
+            pass
+
         for provider_class in provider_classes:
-            provider_config = self.config.get(provider_class.__name__.replace('Provider', '').lower(), {})
+            provider_name = provider_class.__name__.replace('Provider', '').lower()
+            provider_config = self.config.get(provider_name, {})
             if provider_class == TuShareProvider:
                 provider_config['token'] = tushare_token
-            
+
             try:
                 provider = provider_class(provider_config)
                 self._providers[provider.name] = provider
-                print(f"[ProviderManager] 已加载: {provider.display_name} (优先级: {provider.priority})")
+                _log(f"[ProviderManager] 已加载: {provider.display_name} (优先级: {provider.priority})")
             except Exception as e:
-                print(f"[ProviderManager] 加载失败 {provider_class.__name__}: {e}")
+                _log(f"[ProviderManager] 加载失败 {provider_class.__name__}: {e}")
 
-    def _build_capability_index(self):
+    def _build_capability_index(self) -> None:
         self._capability_providers = {}
         for capability in ProviderCapability:
             providers = []
@@ -92,7 +107,7 @@ class ProviderManager:
     def get_providers_for_capability(self, capability: ProviderCapability) -> List[str]:
         return list(self._capability_providers.get(capability, []))
 
-    def _get_cache_key(self, capability: ProviderCapability, **kwargs) -> str:
+    def _get_cache_key(self, capability: ProviderCapability, **kwargs: Any) -> str:
         key_parts = [capability.value]
         for k, v in sorted(kwargs.items()):
             if v is not None:
@@ -102,7 +117,6 @@ class ProviderManager:
     def _get_from_cache(self, key: str) -> Optional[Any]:
         if not self._enable_cache:
             return None
-        
         cached = self._cache.get(key)
         if cached:
             if datetime.now() < cached['expires']:
@@ -111,10 +125,9 @@ class ProviderManager:
                 del self._cache[key]
         return None
 
-    def _set_cache(self, key: str, data: Any, ttl: Optional[int] = None):
+    def _set_cache(self, key: str, data: Any, ttl: Optional[int] = None) -> None:
         if not self._enable_cache:
             return
-        
         ttl = ttl or self._cache_ttl
         self._cache[key] = {
             'data': data,
@@ -126,11 +139,11 @@ class ProviderManager:
         capability: ProviderCapability,
         method_name: str,
         provider_names: Optional[List[str]] = None,
-        **kwargs
+        **kwargs: Any
     ) -> ProviderResult:
         if provider_names is None:
             provider_names = self.get_providers_for_capability(capability)
-        
+
         if not provider_names:
             return ProviderResult(
                 success=False,
@@ -142,29 +155,27 @@ class ProviderManager:
                 ),
                 data_type=self._capability_to_data_type(capability),
             )
-        
-        fallback_chain = []
-        last_error = None
-        
+
+        fallback_chain: List[str] = []
+        last_error: Optional[ProviderError] = None
+
         for provider_name in provider_names:
             provider = self._providers.get(provider_name)
             if not provider:
                 continue
-            
             if not provider.is_available():
-                print(f"[ProviderManager] {provider.display_name} 不可用，跳过")
+                _log(f"[ProviderManager] {provider.display_name} 不可用，跳过")
                 continue
-            
             if not provider.is_configured:
-                print(f"[ProviderManager] {provider.display_name} 未配置，跳过")
+                _log(f"[ProviderManager] {provider.display_name} 未配置，跳过")
                 continue
-            
+
             fallback_chain.append(provider_name)
-            
+
             cache_key = self._get_cache_key(capability, provider=provider_name, **kwargs)
             cached = self._get_from_cache(cache_key)
             if cached:
-                print(f"[ProviderManager] 命中缓存: {provider.display_name}")
+                _log(f"[ProviderManager] 命中缓存: {provider.display_name}")
                 return ProviderResult(
                     success=True,
                     data=cached,
@@ -172,13 +183,12 @@ class ProviderManager:
                     data_type=self._capability_to_data_type(capability),
                     metadata={'cache_hit': True},
                 )
-            
-            print(f"[ProviderManager] 尝试: {provider.display_name}")
-            
+
+            _log(f"[ProviderManager] 尝试: {provider.display_name}")
+
             try:
                 method = getattr(provider, method_name)
                 result = method(**kwargs)
-                
                 if result.success:
                     if result.data is not None:
                         self._set_cache(cache_key, result.data)
@@ -187,8 +197,7 @@ class ProviderManager:
                     return result
                 else:
                     last_error = result.error
-                    print(f"[ProviderManager] {provider.display_name} 失败: {result.error.message if result.error else 'Unknown'}")
-                    
+                    _log(f"[ProviderManager] {provider.display_name} 失败: {result.error.message if result.error else 'Unknown'}")
                     if result.error and not result.error.is_recoverable:
                         break
             except Exception as e:
@@ -197,16 +206,16 @@ class ProviderManager:
                     message=str(e),
                     provider_name=provider_name,
                 )
-                print(f"[ProviderManager] {provider.display_name} 异常: {e}")
-        
+                _log(f"[ProviderManager] {provider.display_name} 异常: {e}")
+
         error_msg = f"所有数据源均失败。尝试顺序: {', '.join(fallback_chain)}"
         if last_error:
             error_msg += f"。最后错误: {last_error.message}"
-        
+
         return ProviderResult(
             success=False,
             error=ProviderError(
-                error_type=ErrorType.UNKNOWN,
+                error_type=last_error.error_type if last_error else ErrorType.UNKNOWN,
                 message=error_msg,
                 provider_name='ProviderManager',
                 original_error=last_error,
@@ -230,104 +239,63 @@ class ProviderManager:
 
     def fetch_realtime(self, code: str, providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(
-            ProviderCapability.REALTIME_QUOTE,
-            'fetch_realtime',
-            provider_names=providers,
-            code=code,
+            ProviderCapability.REALTIME_QUOTE, 'fetch_realtime',
+            provider_names=providers, code=code,
         )
 
-    def fetch_daily_kline(
-        self,
-        code: str,
-        days: int = 250,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        providers: Optional[List[str]] = None,
-    ) -> ProviderResult:
+    def fetch_daily_kline(self, code: str, days: int = 250,
+                          start_date: Optional[str] = None,
+                          end_date: Optional[str] = None,
+                          providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(
-            ProviderCapability.DAILY_KLINE,
-            'fetch_daily_kline',
-            provider_names=providers,
-            code=code,
-            days=days,
-            start_date=start_date,
-            end_date=end_date,
+            ProviderCapability.DAILY_KLINE, 'fetch_daily_kline',
+            provider_names=providers, code=code, days=days,
+            start_date=start_date, end_date=end_date,
         )
 
-    def fetch_minute_kline(
-        self,
-        code: str,
-        klt: int = 5,
-        days: int = 5,
-        providers: Optional[List[str]] = None,
-    ) -> ProviderResult:
+    def fetch_minute_kline(self, code: str, klt: int = 5, days: int = 5,
+                           providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(
-            ProviderCapability.MINUTE_KLINE,
-            'fetch_minute_kline',
-            provider_names=providers,
-            code=code,
-            klt=klt,
-            days=days,
+            ProviderCapability.MINUTE_KLINE, 'fetch_minute_kline',
+            provider_names=providers, code=code, klt=klt, days=days,
         )
 
     def fetch_valuation(self, code: str, providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(
-            ProviderCapability.VALUATION,
-            'fetch_valuation',
-            provider_names=providers,
-            code=code,
+            ProviderCapability.VALUATION, 'fetch_valuation',
+            provider_names=providers, code=code,
         )
 
-    def fetch_fund_flow(
-        self,
-        code: str,
-        days: int = 100,
-        providers: Optional[List[str]] = None,
-    ) -> ProviderResult:
+    def fetch_fund_flow(self, code: str, days: int = 100,
+                        providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(
-            ProviderCapability.FUND_FLOW,
-            'fetch_fund_flow',
-            provider_names=providers,
-            code=code,
-            days=days,
+            ProviderCapability.FUND_FLOW, 'fetch_fund_flow',
+            provider_names=providers, code=code, days=days,
         )
 
-    def fetch_stock_list(
-        self,
-        board: str = 'a_share',
-        providers: Optional[List[str]] = None,
-    ) -> ProviderResult:
+    def fetch_stock_list(self, board: str = 'a_share',
+                         providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(
-            ProviderCapability.STOCK_LIST,
-            'fetch_stock_list',
-            provider_names=providers,
-            board=board,
+            ProviderCapability.STOCK_LIST, 'fetch_stock_list',
+            provider_names=providers, board=board,
         )
 
-    def fetch_financial(
-        self,
-        code: str,
-        report_type: str = 'income',
-        providers: Optional[List[str]] = None,
-    ) -> ProviderResult:
+    def fetch_financial(self, code: str, report_type: str = 'income',
+                        providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(
-            ProviderCapability.FINANCIAL,
-            'fetch_financial',
-            provider_names=providers,
-            code=code,
-            report_type=report_type,
+            ProviderCapability.FINANCIAL, 'fetch_financial',
+            provider_names=providers, code=code, report_type=report_type,
         )
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         self._cache.clear()
-        print("[ProviderManager] 缓存已清空")
+        _log("[ProviderManager] 缓存已清空")
 
     def get_status(self) -> Dict[str, Any]:
-        status = {
+        status: Dict[str, Any] = {
             'providers': {},
             'capabilities': {},
         }
-        
         for name, provider in self._providers.items():
             info = provider.get_info()
             status['providers'][name] = {
@@ -340,8 +308,6 @@ class ProviderManager:
                 'error_count': info.error_count,
                 'last_error': info.last_error,
             }
-        
         for capability, providers in self._capability_providers.items():
             status['capabilities'][capability.value] = providers
-        
         return status

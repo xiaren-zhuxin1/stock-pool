@@ -1,6 +1,3 @@
-import requests
-import time
-import random
 import json
 from typing import Optional, List, Dict, Any
 from .base import (
@@ -54,58 +51,29 @@ class EastMoneyProvider(BaseProvider):
             headers['Origin'] = referer.rstrip('/')
         return headers
 
-    def _request(self, url: str, params: Optional[Dict] = None,
-                 referer: Optional[str] = None) -> ProviderResult:
-        for attempt in range(self._max_retries):
-            try:
-                if attempt > 0:
-                    delay = self._retry_delay * (2 ** attempt) + random.uniform(0, 1)
-                    time.sleep(delay)
-
-                headers = self._get_headers(referer)
-                response = requests.get(url, params=params, headers=headers, 
-                                       timeout=self._timeout)
-                
-                if response.status_code == 200:
-                    return self._create_result(response.json(), DataType.REALTIME)
-                elif response.status_code == 429:
-                    retry_after = 60 + random.randint(0, 10)
-                    return self._create_error_result(
-                        self._create_error(ErrorType.RATE_LIMITED, 
-                                          f"API限流，需等待{retry_after}秒",
-                                          retry_after=retry_after),
-                    )
-                else:
-                    return self._create_error_result(
-                        self._create_error(ErrorType.HTTP_ERROR, 
-                                          f"HTTP错误: {response.status_code}"),
-                    )
-            except requests.exceptions.Timeout:
-                if attempt < self._max_retries - 1:
-                    continue
-                return self._create_error_result(
-                    self._create_error(ErrorType.TIMEOUT, "请求超时"),
-                )
-            except requests.exceptions.ConnectionError as e:
-                if attempt < self._max_retries - 1:
-                    continue
-                return self._create_error_result(
-                    self._create_error(ErrorType.CONNECTION_ERROR, f"连接错误: {e}"),
-                )
-            except json.JSONDecodeError as e:
-                return self._create_error_result(
-                    self._create_error(ErrorType.DATA_ERROR, f"数据解析错误: {e}"),
-                )
-            except Exception as e:
-                return self._create_error_result(
-                    self._create_error(ErrorType.UNKNOWN, f"未知错误: {e}"),
-                )
-        return self._create_error_result(
-            self._create_error(ErrorType.UNKNOWN, "重试次数耗尽"),
-        )
+    def _json_request(self, url: str, params: Optional[Dict] = None,
+                      referer: Optional[str] = None,
+                      data_type: Optional[DataType] = None) -> ProviderResult:
+        headers = self._get_headers(referer)
+        result = self._http_request(url, params=params, headers=headers, data_type=data_type)
+        if not result.success:
+            return result
+        try:
+            parsed = result.data.json()
+            return self._create_result(parsed, data_type or DataType.REALTIME)
+        except json.JSONDecodeError as e:
+            return self._create_error_result(
+                self._create_error(ErrorType.DATA_ERROR, f"JSON解析失败: {e}"),
+                data_type,
+            )
 
     def _get_market_code(self, code: str) -> str:
-        market = '1' if code.startswith('6') else '0'
+        if code.startswith('6'):
+            market = '1'
+        elif code.startswith(('4', '8')):
+            market = '0'
+        else:
+            market = '0'
         return f"{market}.{code}"
 
     def fetch_realtime(self, code: str) -> ProviderResult:
@@ -116,12 +84,11 @@ class EastMoneyProvider(BaseProvider):
             'fields': 'f57,f58,f43,f169,f170,f46,f44,f51,f168,f47,f48,f60,f45,f52,f50,f49,f171,f113,f114,f115,f117,f162,f163,f164,f165,f166,f167,f39,f40,f41,f71,f83,f84,f85,f86,f92,f93,f94,f95,f96,f107,f111,f116,f124,f1,f13',
             'ut': 'fa5fd1943c7b386f1722cd924488a4d8',
         }
-        
-        result = self._request(url, params, referer='https://quote.eastmoney.com/')
+
+        result = self._json_request(url, params, referer='https://quote.eastmoney.com/', data_type=DataType.REALTIME)
         if not result.success:
-            result.data_type = DataType.REALTIME
             return result
-        
+
         try:
             data = result.data
             if not data or 'data' not in data or not data['data']:
@@ -129,7 +96,7 @@ class EastMoneyProvider(BaseProvider):
                     self._create_error(ErrorType.DATA_ERROR, "未获取到股票数据"),
                     DataType.REALTIME,
                 )
-            
+
             d = data['data']
             realtime_data = {
                 'code': code,
@@ -143,20 +110,20 @@ class EastMoneyProvider(BaseProvider):
                 'amount': d.get('f48'),
                 'change_pct': d.get('f170') / 100 if d.get('f170') else None,
                 'pe_ttm': d.get('f162'),
-                'pe_lyr': d.get('f167'),
-                'pb': d.get('f167'),
+                'pe_lyr': d.get('f163'),
+                'pb': d.get('f164'),
                 'market_cap': d.get('f116'),
                 'circ_market_cap': d.get('f117'),
                 'high_52w': d.get('f44') / 100 if d.get('f44') else None,
                 'low_52w': d.get('f45') / 100 if d.get('f45') else None,
                 'data_source': self.name,
             }
-            
-            missing = [k for k, v in realtime_data.items() 
+
+            missing = [k for k, v in realtime_data.items()
                       if k not in ['data_source'] and v is None]
             realtime_data['missing_fields'] = missing
             realtime_data['data_quality'] = 'full' if not missing else 'partial'
-            
+
             return self._create_result(realtime_data, DataType.REALTIME)
         except Exception as e:
             return self._create_error_result(
@@ -178,12 +145,11 @@ class EastMoneyProvider(BaseProvider):
             'end': '20500101',
             'lmt': str(days),
         }
-        
-        result = self._request(url, params, referer='https://quote.eastmoney.com/')
+
+        result = self._json_request(url, params, referer='https://quote.eastmoney.com/', data_type=DataType.DAILY_KLINE)
         if not result.success:
-            result.data_type = DataType.DAILY_KLINE
             return result
-        
+
         try:
             data = result.data
             if not data or 'data' not in data or not data['data']:
@@ -191,7 +157,7 @@ class EastMoneyProvider(BaseProvider):
                     self._create_error(ErrorType.DATA_ERROR, "未获取到K线数据"),
                     DataType.DAILY_KLINE,
                 )
-            
+
             klines = data['data'].get('klines', [])
             return self._create_result(klines, DataType.DAILY_KLINE,
                                        {'count': len(klines)})
@@ -201,7 +167,7 @@ class EastMoneyProvider(BaseProvider):
                 DataType.DAILY_KLINE,
             )
 
-    def fetch_minute_kline(self, code: str, klt: int = 5, 
+    def fetch_minute_kline(self, code: str, klt: int = 5,
                            days: int = 5) -> ProviderResult:
         secid = self._get_market_code(code)
         url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
@@ -214,12 +180,11 @@ class EastMoneyProvider(BaseProvider):
             'end': '20500101',
             'lmt': str(days * 240 // klt),
         }
-        
-        result = self._request(url, params, referer='https://quote.eastmoney.com/')
+
+        result = self._json_request(url, params, referer='https://quote.eastmoney.com/', data_type=DataType.MINUTE_KLINE)
         if not result.success:
-            result.data_type = DataType.MINUTE_KLINE
             return result
-        
+
         try:
             data = result.data
             if not data or 'data' not in data or not data['data']:
@@ -227,7 +192,7 @@ class EastMoneyProvider(BaseProvider):
                     self._create_error(ErrorType.DATA_ERROR, "未获取到分钟K线数据"),
                     DataType.MINUTE_KLINE,
                 )
-            
+
             klines = data['data'].get('klines', [])
             return self._create_result(klines, DataType.MINUTE_KLINE,
                                        {'count': len(klines), 'klt': klt})
@@ -250,12 +215,11 @@ class EastMoneyProvider(BaseProvider):
             'klt': '101',
             'lmt': str(days),
         }
-        
-        result = self._request(url, params, referer='https://quote.eastmoney.com/')
+
+        result = self._json_request(url, params, referer='https://quote.eastmoney.com/', data_type=DataType.FUND_FLOW)
         if not result.success:
-            result.data_type = DataType.FUND_FLOW
             return result
-        
+
         try:
             data = result.data
             if not data or 'data' not in data or not data['data']:
@@ -263,7 +227,7 @@ class EastMoneyProvider(BaseProvider):
                     self._create_error(ErrorType.DATA_ERROR, "未获取到资金流向数据"),
                     DataType.FUND_FLOW,
                 )
-            
+
             klines = data['data'].get('klines', [])
             return self._create_result(klines, DataType.FUND_FLOW,
                                        {'count': len(klines)})
@@ -281,8 +245,10 @@ class EastMoneyProvider(BaseProvider):
             'star': 'm:1+t:23',
             'sh_main': 'm:1+t:2',
             'sz_main': 'm:0+t:6',
+            'bse': 'm:0+t:81,m:1+t:23',
+            'hs_a': 'm:1+t:2,m:0+t:6,m:0+t:80,m:1+t:23',
         }
-        
+
         market = board_map.get(board, board_map['a_share'])
         url = "https://push2.eastmoney.com/api/qt/clist/get"
         params = {
@@ -297,12 +263,11 @@ class EastMoneyProvider(BaseProvider):
             'fs': market,
             'fields': 'f12,f14,f2,f3,f4,f5,f6,f7,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152',
         }
-        
-        result = self._request(url, params, referer='https://quote.eastmoney.com/')
+
+        result = self._json_request(url, params, referer='https://quote.eastmoney.com/', data_type=DataType.STOCK_LIST)
         if not result.success:
-            result.data_type = DataType.STOCK_LIST
             return result
-        
+
         try:
             data = result.data
             if not data or 'data' not in data or not data['data']:
@@ -310,16 +275,17 @@ class EastMoneyProvider(BaseProvider):
                     self._create_error(ErrorType.DATA_ERROR, "未获取到股票列表"),
                     DataType.STOCK_LIST,
                 )
-            
+
             diff = data['data'].get('diff', [])
             stocks = []
             for item in diff:
+                stock_code = str(item.get('f12', ''))
                 stocks.append({
-                    'code': item.get('f12'),
+                    'code': stock_code,
                     'name': item.get('f14'),
-                    'market': 'SH' if str(item.get('f12', '')).startswith('6') else 'SZ',
+                    'market': 'SH' if stock_code.startswith('6') else ('BJ' if stock_code.startswith(('4', '8')) else 'SZ'),
                 })
-            
+
             return self._create_result(stocks, DataType.STOCK_LIST,
                                        {'board': board, 'count': len(stocks)})
         except Exception as e:

@@ -201,7 +201,7 @@ class AkShareProvider(BaseProvider):
             )
 
         try:
-            df = ak.stock_individual_fund_flow(stock=code, market="sh" if code.startswith('6') else "sz")
+            df = ak.stock_individual_fund_flow(stock=code, market="sh" if code.startswith('6') else ("bj" if code.startswith(('4', '8')) else "sz"))
             
             if df is None or df.empty:
                 return self._create_error_result(
@@ -252,6 +252,8 @@ class AkShareProvider(BaseProvider):
                 elif board == 'gem' and not code.startswith('300'):
                     continue
                 elif board == 'star' and not code.startswith('688'):
+                    continue
+                elif board == 'bse' and not (code.startswith('4') or code.startswith('8')):
                     continue
                 elif board == 'sh_main' and not code.startswith('60'):
                     continue

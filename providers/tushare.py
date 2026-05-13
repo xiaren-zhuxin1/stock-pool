@@ -61,7 +61,12 @@ class TuShareProvider(BaseProvider):
         return TUSHARE_AVAILABLE and self._token is not None and self._pro is not None
 
     def _get_ts_code(self, code: str) -> str:
-        suffix = 'SH' if code.startswith('6') else 'SZ'
+        if code.startswith('6'):
+            suffix = 'SH'
+        elif code.startswith(('4', '8')):
+            suffix = 'BJ'
+        else:
+            suffix = 'SZ'
         return f"{code}.{suffix}"
 
     def _handle_api_error(self, e: Exception) -> ProviderError:
