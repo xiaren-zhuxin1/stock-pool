@@ -856,6 +856,270 @@ class StockDataPool:
             progress_callback(dict(summary))
         return summary
 
+    def _fetch_universe_codes(self, board='a_share'):
+        universe_result = self.api.fetch_stock_list(board=board)
+        if universe_result.success and universe_result.data:
+            codes = [str(item.get('code', '')).strip() for item in universe_result.data]
+            return [code for code in codes if code], 'online', None
+
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            cursor.execute('SELECT code FROM stock_info ORDER BY code')
+            codes = [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+        error = None
+        if universe_result.error:
+            error = universe_result.error.message
+        return codes, 'local_fallback', error
+
+    def get_data_coverage(self, board='a_share', min_daily_rows=240):
+        min_daily_rows = self._normalize_positive_int(min_daily_rows, 240, 500) or 240
+        codes, universe_source, universe_error = self._fetch_universe_codes(board)
+        total = len(codes)
+        coverage = {
+            'success': True,
+            'board': board,
+            'universe_source': universe_source,
+            'universe_error': universe_error,
+            'universe_total': total,
+            'total_stocks': total,
+            'min_daily_rows': min_daily_rows,
+            'daily_covered': 0,
+            'technical_covered': 0,
+            'position_covered': 0,
+            'latest_daily_date': None,
+            'oldest_latest_daily_date': None,
+            'coverage_pct': {
+                'daily': 0,
+                'technical': 0,
+                'position': 0,
+            },
+            'not_ready_reason': None,
+        }
+        if universe_source != 'online':
+            coverage['not_ready_reason'] = '未能获取在线全市场股票列表；当前覆盖率仅基于本地股票集合，不能代表全市场。'
+        if not codes:
+            coverage['success'] = False
+            coverage['not_ready_reason'] = '无法获取股票列表，且本地没有可用于统计的股票信息。'
+            return coverage
+
+        daily_rows = {}
+        technical_codes = set()
+        position_codes = set()
+        conn = self._connect()
+        try:
+            cursor = conn.cursor()
+            for chunk in self._chunked(codes, 500):
+                placeholders = ','.join('?' for _ in chunk)
+                cursor.execute(f'''
+                    SELECT code, COUNT(*) AS row_count, MAX(data_date) AS latest_date
+                    FROM stock_daily
+                    WHERE code IN ({placeholders})
+                    GROUP BY code
+                ''', chunk)
+                for code, row_count, latest_date in cursor.fetchall():
+                    daily_rows[code] = {'row_count': row_count or 0, 'latest_date': latest_date}
+
+                cursor.execute(f'''
+                    SELECT t.code,
+                           MAX(CASE WHEN t.position_pct IS NOT NULL THEN 1 ELSE 0 END) AS has_position
+                    FROM stock_technical t
+                    JOIN (
+                        SELECT code, MAX(data_date) AS data_date
+                        FROM stock_technical
+                        WHERE code IN ({placeholders})
+                        GROUP BY code
+                    ) latest
+                      ON t.code = latest.code AND t.data_date = latest.data_date
+                    GROUP BY t.code
+                ''', chunk)
+                for code, has_position in cursor.fetchall():
+                    technical_codes.add(code)
+                    if has_position:
+                        position_codes.add(code)
+        finally:
+            conn.close()
+
+        latest_dates = [item['latest_date'] for item in daily_rows.values() if item.get('latest_date')]
+        daily_covered_codes = {
+            code for code, item in daily_rows.items()
+            if item.get('row_count', 0) >= min_daily_rows
+        }
+        coverage['daily_covered'] = len(daily_covered_codes)
+        coverage['technical_covered'] = len(technical_codes)
+        coverage['position_covered'] = len(position_codes)
+        coverage['latest_daily_date'] = max(latest_dates) if latest_dates else None
+        coverage['oldest_latest_daily_date'] = min(latest_dates) if latest_dates else None
+        coverage['coverage_pct'] = {
+            'daily': round(coverage['daily_covered'] / total * 100, 2) if total else 0,
+            'technical': round(coverage['technical_covered'] / total * 100, 2) if total else 0,
+            'position': round(coverage['position_covered'] / total * 100, 2) if total else 0,
+        }
+        if coverage['not_ready_reason'] is None and coverage['coverage_pct']['position'] < 95:
+            coverage['not_ready_reason'] = '52周位置覆盖率未达到95%，不建议做全市场位置筛选。'
+        return coverage
+
+    def sync_history_batch(self, board='a_share', refresh='missing', max_codes=50, days=250,
+                           delay=0.2, job_id=None, start_offset=None):
+        if refresh not in ('missing', 'stale', 'force'):
+            refresh = 'missing'
+        max_codes = self._normalize_positive_int(max_codes, 20, 50) or 20
+        days = self._normalize_positive_int(days, 250, 300) or 250
+        delay = self._to_number(delay)
+        if delay is None:
+            delay = 0.2
+        delay = max(0, min(delay, 2))
+
+        existing_job = self.get_sync_job(job_id) if job_id else None
+        if existing_job and start_offset is None:
+            start_offset = existing_job.get('progress', {}).get('next_offset', 0)
+        start_offset = self._normalize_positive_int(start_offset, 0, 100000) if start_offset is not None else 0
+
+        codes, universe_source, universe_error = self._fetch_universe_codes(board)
+        if universe_source != 'online':
+            return {
+                'success': False,
+                'error_code': 'UNIVERSE_UNAVAILABLE',
+                'error': '历史数据补全需要实时获取全市场股票列表，当前数据源不可用。',
+                'universe_source': universe_source,
+                'universe_error': universe_error,
+            }
+
+        total = len(codes)
+        selected = codes[start_offset:start_offset + max_codes]
+        now = self.get_current_time_info()['datetime']
+        if not job_id:
+            job_id = f'history-{board}-{datetime.now().strftime("%Y%m%d%H%M%S")}'
+
+        summary = {
+            'success': True,
+            'job_id': job_id,
+            'board': board,
+            'refresh': refresh,
+            'days': days,
+            'universe_total': total,
+            'start_offset': start_offset,
+            'batch_size': len(selected),
+            'next_offset': min(start_offset + len(selected), total),
+            'has_more': (start_offset + len(selected)) < total,
+            'scanned': 0,
+            'refreshed': 0,
+            'skipped_fresh': 0,
+            'failed': 0,
+            'failures': [],
+        }
+        self.save_sync_job({
+            'job_id': job_id,
+            'job_type': 'history_batch',
+            'status': 'running',
+            'args': {'board': board, 'refresh': refresh, 'max_codes': max_codes, 'days': days, 'delay': delay},
+            'progress': dict(summary),
+            'created_at': existing_job.get('created_at') if existing_job else now,
+            'updated_at': now,
+        })
+
+        today = self.get_current_time_info()['date']
+        status = 'completed'
+        error = None
+        for code in selected:
+            summary['scanned'] += 1
+            try:
+                freshness = self.check_data_freshness(code, 'daily')
+                if not self._needs_daily_refresh(freshness, refresh, today):
+                    summary['skipped_fresh'] += 1
+                else:
+                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
+                    summary['refreshed'] += 1
+            except Exception as exc:
+                summary['failed'] += 1
+                if len(summary['failures']) < 20:
+                    summary['failures'].append({'code': code, 'error': str(exc)})
+
+        if summary['failed']:
+            status = 'partial'
+            error = f"{summary['failed']}只股票同步失败"
+        self.save_sync_job({
+            'job_id': job_id,
+            'job_type': 'history_batch',
+            'status': status,
+            'args': {'board': board, 'refresh': refresh, 'max_codes': max_codes, 'days': days, 'delay': delay},
+            'progress': dict(summary),
+            'error': error,
+            'created_at': existing_job.get('created_at') if existing_job else now,
+            'updated_at': self.get_current_time_info()['datetime'],
+        })
+        return summary
+
+    def screen_position(self, criteria=None):
+        criteria = dict(criteria or {})
+        board = criteria.get('board') or 'a_share'
+        min_coverage_pct = self._to_number(criteria.get('min_coverage_pct'))
+        if min_coverage_pct is None:
+            min_coverage_pct = 95
+        min_coverage_pct = max(0, min(min_coverage_pct, 100))
+        min_daily_rows = self._normalize_positive_int(criteria.get('min_daily_rows'), 240, 500) or 240
+
+        coverage = self.get_data_coverage(board=board, min_daily_rows=min_daily_rows)
+        position_pct = coverage.get('coverage_pct', {}).get('position', 0)
+        allow_local_universe = bool(criteria.get('allow_local_universe', False))
+        if coverage.get('universe_source') != 'online' and not allow_local_universe:
+            return {
+                'success': False,
+                'error_code': 'UNIVERSE_UNAVAILABLE',
+                'error': '无法获取在线全市场股票列表；为避免本地股票集合误导，拒绝执行全市场52周位置筛选。',
+                'coverage': coverage,
+                'suggested_action': '稍后重试在线股票列表，或显式设置 allow_local_universe=true 仅做本地股票池筛选。',
+            }
+        if not coverage.get('success') or position_pct < min_coverage_pct:
+            return {
+                'success': False,
+                'error_code': 'INSUFFICIENT_POSITION_COVERAGE',
+                'error': f'52周位置覆盖率 {position_pct}% 未达到阈值 {min_coverage_pct}%，拒绝全市场位置筛选。',
+                'coverage': coverage,
+                'suggested_action': '先用 sync_history_batch 分批补历史数据，或用 screen_market 在线估值筛出少量候选后调用 analyze_position。',
+            }
+
+        position_min = self._to_number(criteria.get('position_min'))
+        position_max = self._to_number(criteria.get('position_max'))
+        for name, value in (('position_min', position_min), ('position_max', position_max)):
+            if value is not None and 0 < value <= 1:
+                if name == 'position_min':
+                    position_min = value * 100
+                else:
+                    position_max = value * 100
+        limit = self._normalize_positive_int(criteria.get('limit'), 20, 50)
+        offset = self._normalize_positive_int(criteria.get('offset'), 0, 100000)
+        sort_order = criteria.get('sort_order', 'asc')
+        reverse = sort_order == 'desc'
+
+        codes, _, _ = self._fetch_universe_codes(board)
+        data = self.get_latest_data(codes, include_realtime=False, batch_size=500)
+        matched = []
+        for row in data:
+            position = row.get('position_pct')
+            if not self._passes_range(position, position_min, position_max):
+                continue
+            matched.append(row)
+        non_null = [item for item in matched if item.get('position_pct') is not None]
+        null_items = [item for item in matched if item.get('position_pct') is None]
+        non_null.sort(key=lambda item: item.get('position_pct'), reverse=reverse)
+        matched = non_null + null_items
+        page = matched[offset:offset + limit]
+        return {
+            'success': True,
+            'board': board,
+            'coverage': coverage,
+            'matched_count': len(matched),
+            'returned': len(page),
+            'offset': offset,
+            'limit': limit,
+            'has_more': offset + limit < len(matched),
+            'results': page,
+        }
+
     def screen_market(self, criteria=None):
         criteria = dict(criteria or {})
         board = criteria.get('board') or criteria.get('market') or 'a_share'

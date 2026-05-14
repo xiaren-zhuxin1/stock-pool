@@ -646,6 +646,40 @@ class StockPoolServer:
     def _handle_screen_market(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self.pool.screen_market(arguments)
 
+    def _handle_get_data_coverage(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        board = arguments.get('board', 'a_share')
+        min_daily_rows = self._normalize_positive_int(arguments.get('min_daily_rows', 240), 240, 500) or 240
+        return create_success_response(self.pool.get_data_coverage(board=board, min_daily_rows=min_daily_rows))
+
+    def _handle_sync_history_batch(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        board = arguments.get('board', 'a_share')
+        refresh = arguments.get('refresh', 'missing')
+        max_codes = self._normalize_positive_int(arguments.get('max_codes', 20), 20, 50) or 20
+        days = self._normalize_positive_int(arguments.get('days', 250), 250, 300) or 250
+        delay = self._to_number(arguments.get('delay'))
+        if delay is None:
+            delay = 0.2
+        result = self.pool.sync_history_batch(
+            board=board,
+            refresh=refresh,
+            max_codes=max_codes,
+            days=days,
+            delay=delay,
+            job_id=arguments.get('job_id'),
+            start_offset=arguments.get('start_offset'),
+        )
+        if result.get('success'):
+            return create_success_response(result)
+        return create_error_response(
+            message=result.get('error', '历史数据补全失败'),
+            error_code=result.get('error_code', 'SYNC_FAILED'),
+            recoverable=True,
+            suggested_action='稍后重试，或降低 max_codes/delay 后继续用 next_offset 分批补全。',
+        )
+
+    def _handle_screen_position(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        return self.pool.screen_position(arguments)
+
     handle_tool_call_handlers = None
 
     def handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -663,6 +697,9 @@ class StockPoolServer:
             'get_stock_detail': self._handle_get_stock_detail,
             'analyze_intraday': self._handle_analyze_intraday,
             'screen_market': self._handle_screen_market,
+            'get_data_coverage': self._handle_get_data_coverage,
+            'sync_history_batch': self._handle_sync_history_batch,
+            'screen_position': self._handle_screen_position,
         }
 
         handler = handlers.get(name)

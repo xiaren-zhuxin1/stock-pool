@@ -9,12 +9,12 @@ MCP工具定义 - 面向agent的精简接口
 5. 错误提示明确：区分永久错误(代码错误)和临时错误(网络/限流)
 6. 工具精简合并，减少agent的选择负担
 
-工具分类（13个）：
+工具分类（16个）：
 - 系统工具: get_current_time
 - 行情工具: get_realtime_quotes, get_daily_kline, get_minute_kline
 - 分析工具: analyze_stock, analyze_position, analyze_intraday
 - 数据工具: get_fund_flow, get_financial_data, get_latest_data, get_stock_detail
-- 筛选工具: screen_market, get_stock_list
+- 筛选工具: screen_market, screen_position, get_stock_list, get_data_coverage, sync_history_batch
 """
 
 TOOLS = [
@@ -173,6 +173,51 @@ TOOLS = [
                 "sort_order": {"type": "string", "description": "排序方向: asc/desc", "default": "asc"},
                 "limit": {"type": "integer", "description": "返回数量，默认20，最大50", "default": 20, "maximum": 50},
                 "offset": {"type": "integer", "description": "分页偏移量", "default": 0}
+            }
+        }
+    },
+    {
+        "name": "screen_position",
+        "description": "按本地52周位置筛选全市场股票。只有数据覆盖率达到阈值才执行；默认要求position覆盖率95%。覆盖不足会返回错误，并建议先分批补历史数据。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
+                "position_min": {"type": "number", "description": "52周位置下限(%)"},
+                "position_max": {"type": "number", "description": "52周位置上限(%)"},
+                "min_coverage_pct": {"type": "number", "description": "最低覆盖率阈值，默认95", "default": 95},
+                "min_daily_rows": {"type": "integer", "description": "认为日K覆盖有效的最少记录数，默认240", "default": 240, "maximum": 500},
+                "allow_local_universe": {"type": "boolean", "description": "允许仅对本地股票池做位置筛选；默认false，避免误认为全市场", "default": False},
+                "sort_order": {"type": "string", "description": "排序方向: asc/desc", "default": "asc"},
+                "limit": {"type": "integer", "description": "返回数量，默认20，最大50", "default": 20, "maximum": 50},
+                "offset": {"type": "integer", "description": "分页偏移量", "default": 0}
+            }
+        }
+    },
+    {
+        "name": "get_data_coverage",
+        "description": "查询本地历史数据覆盖率，包括日K、技术指标和52周位置覆盖比例。用于判断能否信任本地位置筛选。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
+                "min_daily_rows": {"type": "integer", "description": "认为日K覆盖有效的最少记录数，默认240", "default": 240, "maximum": 500}
+            }
+        }
+    },
+    {
+        "name": "sync_history_batch",
+        "description": "小批量补全历史日K和技术指标。每次最多50只，记录job_id、next_offset和失败项；大量补全请由agent按next_offset分批调用。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
+                "refresh": {"type": "string", "description": "刷新模式: missing/stale/force", "default": "missing"},
+                "max_codes": {"type": "integer", "description": "本批最多处理股票数，默认20，最大50", "default": 20, "maximum": 50},
+                "days": {"type": "integer", "description": "补历史日K天数，默认250，最大300", "default": 250, "maximum": 300},
+                "delay": {"type": "number", "description": "单只股票之间延迟秒数，默认0.2，最大2", "default": 0.2},
+                "job_id": {"type": "string", "description": "续跑任务ID；不传则创建新任务"},
+                "start_offset": {"type": "integer", "description": "从全市场股票列表的偏移位置开始；续跑时默认读取任务next_offset"}
             }
         }
     },

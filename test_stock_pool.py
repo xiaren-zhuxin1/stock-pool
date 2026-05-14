@@ -527,6 +527,99 @@ class TestStockDataPool(unittest.TestCase):
         self.assertIsNone(data[0]['main_net_inflow_pct'])
         print("  6字段资金流已保存")
 
+    def test_data_coverage_and_position_gate(self):
+        print("\n[测试] 数据覆盖率与52周位置门禁")
+        pool = StockDataPool(':memory:')
+
+        class FakeAPI:
+            def fetch_stock_list(self, board='a_share', limit=None, page_size=100):
+                return ProviderResult(
+                    success=True,
+                    data=[
+                        {'code': '000001', 'name': '测试1', 'market': 'SZ'},
+                        {'code': '000002', 'name': '测试2', 'market': 'SZ'},
+                        {'code': '000003', 'name': '测试3', 'market': 'SZ'},
+                    ],
+                    provider_name='fake'
+                )
+
+            def fetch_realtime(self, code):
+                return ProviderResult(success=False, data=None, provider_name='fake')
+
+        pool.api = FakeAPI()
+        for code in ['000001', '000002']:
+            pool.save_stock_info(code, {'name': f'测试{code}', 'market': 'SZ'})
+            rows = []
+            for idx in range(12):
+                day = datetime(2024, 1, 1) + timedelta(days=idx)
+                close = 10 + idx if code == '000001' else 20 - idx * 0.5
+                rows.append(f"{day.strftime('%Y-%m-%d')},{close},{close},{close},{close},100,1000")
+            pool.save_daily_data(code, rows)
+            pool.calculate_technical(code)
+
+        coverage = pool.get_data_coverage(min_daily_rows=10)
+        self.assertEqual(coverage['universe_total'], 3)
+        self.assertEqual(coverage['daily_covered'], 2)
+        self.assertEqual(coverage['position_covered'], 2)
+
+        blocked = pool.screen_position({'position_max': 50, 'min_daily_rows': 10, 'min_coverage_pct': 90})
+        self.assertFalse(blocked['success'])
+        self.assertEqual(blocked['error_code'], 'INSUFFICIENT_POSITION_COVERAGE')
+
+        result = pool.screen_position({'position_max': 100, 'min_daily_rows': 10, 'min_coverage_pct': 60})
+        self.assertTrue(result['success'])
+        self.assertEqual(result['matched_count'], 2)
+        print(f"  位置覆盖率: {coverage['coverage_pct']['position']}%")
+
+    def test_sync_history_batch_records_progress(self):
+        print("\n[测试] 小批量历史同步记录进度")
+        pool = StockDataPool(':memory:')
+        refreshed = []
+
+        class FakeAPI:
+            def fetch_stock_list(self, board='a_share', limit=None, page_size=100):
+                return ProviderResult(
+                    success=True,
+                    data=[{'code': '000001'}, {'code': '000002'}, {'code': '000003'}],
+                    provider_name='fake'
+                )
+
+        pool.api = FakeAPI()
+
+        def fake_update_stock(code, days=250, delay=1.5, force=False):
+            refreshed.append((code, days, force))
+            pool.save_stock_info(code, {'name': code, 'market': 'SZ'})
+
+        pool.update_stock = fake_update_stock
+        result = pool.sync_history_batch(max_codes=2, days=30, delay=0, job_id='batch-test')
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['scanned'], 2)
+        self.assertEqual(result['next_offset'], 2)
+        self.assertTrue(result['has_more'])
+        self.assertEqual([item[0] for item in refreshed], ['000001', '000002'])
+        stored = pool.get_sync_job('batch-test')
+        self.assertIn(stored['status'], ('completed', 'partial'))
+        self.assertEqual(stored['progress']['next_offset'], 2)
+        print(f"  next_offset: {result['next_offset']}")
+
+    def test_screen_position_rejects_local_universe_by_default(self):
+        print("\n[测试] 位置筛选默认拒绝本地股票池冒充全市场")
+        pool = StockDataPool(':memory:')
+        pool.save_stock_info('000001', {'name': '测试1', 'market': 'SZ'})
+
+        class FailingAPI:
+            def fetch_stock_list(self, board='a_share', limit=None, page_size=100):
+                return ProviderResult(success=False, data=None, provider_name='fake')
+
+        pool.api = FailingAPI()
+        result = pool.screen_position({'position_max': 30})
+
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error_code'], 'UNIVERSE_UNAVAILABLE')
+        self.assertEqual(result['coverage']['universe_source'], 'local_fallback')
+        print("  已拒绝本地股票池位置筛选")
+
     def test_sync_market_refreshes_only_needed_codes(self):
         print("\n[测试] 市场同步只刷新需要补齐的股票")
         pool = StockDataPool(':memory:')

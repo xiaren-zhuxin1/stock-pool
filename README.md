@@ -68,6 +68,9 @@
 | 工具 | 说明 |
 |------|------|
 | screen_market | 按在线估值、市值筛选全市场股票 |
+| screen_position | 覆盖率达标后按本地52周位置筛选 |
+| get_data_coverage | 查看日K、技术指标、52周位置覆盖率 |
+| sync_history_batch | 小批量补全历史日K和技术指标，支持断点续跑 |
 | get_stock_list | 分页获取板块股票列表 |
 
 ## 使用示例
@@ -113,14 +116,28 @@ result = pool.screen_market({
     "market_cap_min": 100,
     "limit": 20
 }}
+
+// 查看历史数据覆盖率
+{"name": "get_data_coverage", "arguments": {
+    "board": "a_share",
+    "min_daily_rows": 240
+}}
+
+// 小批量补历史数据；大量补全按 next_offset 续跑
+{"name": "sync_history_batch", "arguments": {
+    "board": "a_share",
+    "max_codes": 20,
+    "days": 250
+}}
 ```
 
 ## Agent使用规则
 
 1. **必须先调用 `get_current_time`**：确定分析截止日期和交易时段
-2. **全市场估值/市值筛选用 `screen_market`**：并提供至少一个筛选条件；52周位置对候选股另用 `analyze_position`
+2. **全市场估值/市值筛选用 `screen_market`**：并提供至少一个筛选条件；52周位置优先对候选股用 `analyze_position`
 3. **个股分析用 `analyze_stock`**：一次调用获取完整分析
 4. **小批量获取用 `get_latest_data`**：最多10只，大量由agent分批遍历
+5. **全市场52周位置筛选先看 `get_data_coverage`**：覆盖率不足时用 `sync_history_batch` 小批量补全；在线股票列表不可用时不得把本地股票池当全市场
 
 ### 推荐流程
 
