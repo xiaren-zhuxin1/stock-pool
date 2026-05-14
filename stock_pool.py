@@ -20,7 +20,7 @@ def print(*args, **kwargs):
     return builtins.print(*args, **kwargs)
 
 try:
-    from .api_provider import StockAPIProvider
+    from .provider_manager import ProviderManager
     from .indicators import calculate_ma, calculate_technical_indicators, ema, rsi
     from .sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
     from .storage import (
@@ -46,8 +46,35 @@ try:
         seconds_until_intraday_data,
         intraday_resolution,
     )
+    from .errors import logger, ValidationError, ProviderError
 except ImportError:
-    from api_provider import StockAPIProvider
+    from provider_manager import ProviderManager
+    from indicators import calculate_ma, calculate_technical_indicators, ema, rsi
+    from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
+    from storage import (
+        init_database_schema,
+        save_stock_info as storage_save_stock_info,
+        save_daily_data as storage_save_daily_data,
+        save_valuation_data as storage_save_valuation_data,
+        save_technical_data as storage_save_technical_data,
+        save_fund_flow_data as storage_save_fund_flow_data,
+        get_stock_info as storage_get_stock_info,
+        get_daily_data as storage_get_daily_data,
+        get_valuation_data as storage_get_valuation_data,
+        get_technical_data as storage_get_technical_data,
+        get_fund_flow_data as storage_get_fund_flow_data,
+        get_daily_data_for_technical,
+        check_data_freshness as storage_check_data_freshness,
+    )
+    from minute_data import (
+        save_minute_data as minute_save_minute_data,
+        get_minute_data as minute_get_minute_data,
+        minute_fetch_days_for_range,
+        minute_kline_range,
+        seconds_until_intraday_data,
+        intraday_resolution,
+    )
+    from errors import logger, ValidationError, ProviderError
     from indicators import calculate_ma, calculate_technical_indicators, ema, rsi
     from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
     from storage import (
@@ -88,7 +115,7 @@ class StockDataPool:
             self._memory_keeper = sqlite3.connect(self.db_path, uri=True)
         else:
             self.db_path = db_path or DB_PATH
-        self.api: StockAPIProvider = StockAPIProvider()
+        self.api = ProviderManager()
         self._init_db()
         self.sync_jobs = SyncJobStore(self._connect, self._normalize_positive_int, self.get_current_time_info)
 
@@ -515,8 +542,14 @@ class StockDataPool:
             try:
                 self.update_stock(code, days, delay)
                 results[code] = 'success'
+            except (ValidationError, ProviderError) as e:
+                logger.warning(f"更新股票失败 {code}: {e.message}", code=code, error_code=e.error_code)
+                results[code] = e.message
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"网络错误 {code}: {e}", code=code)
+                results[code] = f"网络错误: {e}"
             except Exception as e:
-                print(f"  更新失败: {e}")
+                logger.error(f"更新股票未预期的错误 {code}: {e}", exc_info=True, code=code)
                 results[code] = str(e)
         return results
     
@@ -780,11 +813,21 @@ class StockDataPool:
                 else:
                     self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
                     summary['refreshed'] += 1
+            except (ValidationError, ProviderError) as e:
+                summary['failed'] += 1
+                if len(summary['failures']) < 20:
+                    summary['failures'].append({'code': code, 'error': e.message, 'error_code': e.error_code})
+                logger.warning(f"市场同步失败 {code}: {e.message}", code=code, error_code=e.error_code)
+            except (ConnectionError, TimeoutError) as e:
+                summary['failed'] += 1
+                if len(summary['failures']) < 20:
+                    summary['failures'].append({'code': code, 'error': str(e), 'error_type': 'network'})
+                logger.warning(f"网络错误 {code}: {e}", code=code)
             except Exception as e:
                 summary['failed'] += 1
                 if len(summary['failures']) < 20:
-                    summary['failures'].append({'code': code, 'error': str(e)})
-                print(f"  市场同步失败 {code}: {e}")
+                    summary['failures'].append({'code': code, 'error': str(e), 'error_type': 'unexpected'})
+                logger.error(f"市场同步未预期的错误 {code}: {e}", exc_info=True, code=code)
 
             if progress_callback:
                 progress_callback(dict(summary))
@@ -851,8 +894,14 @@ class StockDataPool:
                 try:
                     self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
                     refreshed['success'] += 1
+                except (ValidationError, ProviderError) as e:
+                    logger.warning(f"筛选刷新失败 {code}: {e.message}", code=code, error_code=e.error_code)
+                    refreshed['failed'] += 1
+                except (ConnectionError, TimeoutError) as e:
+                    logger.warning(f"网络错误 {code}: {e}", code=code)
+                    refreshed['failed'] += 1
                 except Exception as e:
-                    print(f"  筛选刷新失败 {code}: {e}")
+                    logger.error(f"筛选刷新未预期的错误 {code}: {e}", exc_info=True, code=code)
                     refreshed['failed'] += 1
 
         snapshots = self.get_latest_data(codes, include_realtime=False, batch_size=batch_size)

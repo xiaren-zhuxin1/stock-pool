@@ -90,9 +90,16 @@ class TencentProvider(BaseProvider):
             realtime_data['missing_fields'] = missing
             realtime_data['data_quality'] = 'full' if not missing else 'partial'
             return self._create_result(realtime_data, DataType.REALTIME)
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            _log(f"[{self.display_name}] 数据解析错误: {e}")
             return self._create_error_result(
-                self._create_error(ErrorType.DATA_ERROR, f"数据解析失败: {e}"),
+                self._create_error(ErrorType.DATA_ERROR, f"数据解析失败: {e}", e),
+                DataType.REALTIME,
+            )
+        except Exception as e:
+            _log(f"[{self.display_name}] 未预期的错误: {e}")
+            return self._create_error_result(
+                self._create_error(ErrorType.DATA_ERROR, f"数据解析失败: {e}", e),
                 DataType.REALTIME,
             )
 
@@ -131,9 +138,16 @@ class TencentProvider(BaseProvider):
                     )
             return self._create_result(klines, DataType.DAILY_KLINE,
                                        {'count': len(klines)})
-        except Exception as e:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
+            _log(f"[{self.display_name}] 数据解析错误: {e}")
             return self._create_error_result(
-                self._create_error(ErrorType.DATA_ERROR, f"K线数据解析失败: {e}"),
+                self._create_error(ErrorType.DATA_ERROR, f"数据解析失败: {e}", e),
+                DataType.DAILY_KLINE,
+            )
+        except Exception as e:
+            _log(f"[{self.display_name}] 未预期的错误: {e}")
+            return self._create_error_result(
+                self._create_error(ErrorType.DATA_ERROR, f"数据解析失败: {e}", e),
                 DataType.DAILY_KLINE,
             )
 

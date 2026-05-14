@@ -126,7 +126,20 @@ class TuShareProvider(BaseProvider):
 
             return self._create_result(klines, DataType.DAILY_KLINE,
                                        {'count': len(klines)})
+        except (ConnectionError, TimeoutError) as e:
+            _log(f"[{self.display_name}] 网络错误: {e}")
+            return self._create_error_result(
+                self._create_error(ErrorType.CONNECTION_ERROR, f"网络连接失败: {e}", e),
+                DataType.DAILY_KLINE,
+            )
+        except (KeyError, ValueError, TypeError) as e:
+            _log(f"[{self.display_name}] 数据解析错误: {e}")
+            return self._create_error_result(
+                self._create_error(ErrorType.DATA_ERROR, f"数据解析失败: {e}", e),
+                DataType.DAILY_KLINE,
+            )
         except Exception as e:
+            _log(f"[{self.display_name}] 未预期的错误: {e}")
             return self._create_error_result(
                 self._handle_api_error(e),
                 DataType.DAILY_KLINE,
@@ -165,7 +178,20 @@ class TuShareProvider(BaseProvider):
 
             return self._create_result(klines, DataType.MINUTE_KLINE,
                                        {'count': len(klines), 'klt': klt})
+        except (ConnectionError, TimeoutError) as e:
+            _log(f"[{self.display_name}] 网络错误: {e}")
+            return self._create_error_result(
+                self._create_error(ErrorType.CONNECTION_ERROR, f"网络连接失败: {e}", e),
+                DataType.MINUTE_KLINE,
+            )
+        except (KeyError, ValueError, TypeError) as e:
+            _log(f"[{self.display_name}] 数据解析错误: {e}")
+            return self._create_error_result(
+                self._create_error(ErrorType.DATA_ERROR, f"数据解析失败: {e}", e),
+                DataType.MINUTE_KLINE,
+            )
         except Exception as e:
+            _log(f"[{self.display_name}] 未预期的错误: {e}")
             return self._create_error_result(
                 self._handle_api_error(e),
                 DataType.MINUTE_KLINE,

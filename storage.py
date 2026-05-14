@@ -203,7 +203,9 @@ def save_daily_data(conn: sqlite3.Connection, code: str, klines: List[str]) -> i
     cursor = conn.cursor()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    count = 0
+    valid_rows = []
+    error_count = 0
+    
     for kline in klines:
         data_date = 'UNKNOWN'
         try:
@@ -218,17 +220,28 @@ def save_daily_data(conn: sqlite3.Connection, code: str, klines: List[str]) -> i
             volume = float(parts[5])
             amount = float(parts[6])
             
-            cursor.execute('''
+            valid_rows.append((code, data_date, open_price, high, low, close_price, volume, amount, now))
+        except (TypeError, ValueError, sqlite3.Error) as e:
+            error_count += 1
+            if error_count <= 5:
+                print(f"  保存日K失败 {code} {data_date}: {e}")
+    
+    if valid_rows:
+        try:
+            cursor.executemany('''
                 INSERT OR REPLACE INTO stock_daily 
                 (code, data_date, open, high, low, close, volume, amount, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (code, data_date, open_price, high, low, close_price, volume, amount, now))
-            count += 1
-        except (TypeError, ValueError, sqlite3.Error) as e:
-            print(f"  保存日K失败 {code} {data_date}: {e}")
+            ''', valid_rows)
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"  批量保存日K失败 {code}: {e}")
+            return 0
     
-    conn.commit()
-    return count
+    if error_count > 5:
+        print(f"  保存日K共有 {error_count} 条失败记录")
+    
+    return len(valid_rows)
 
 
 def save_valuation_data(conn: sqlite3.Connection, code: str, valuation: Dict[str, Any]) -> None:
@@ -251,17 +264,17 @@ def save_valuation_data(conn: sqlite3.Connection, code: str, valuation: Dict[str
 
 
 def save_technical_data(conn: sqlite3.Connection, code: str, technical_items: List[Dict[str, Any]]) -> None:
+    if not technical_items:
+        return
+    
     cursor = conn.cursor()
+    
+    valid_rows = []
+    error_count = 0
     
     for item in technical_items:
         try:
-            cursor.execute('''
-                INSERT OR REPLACE INTO stock_technical
-                (code, data_date, ma5, ma10, ma20, ma60, ema12, ema26, macd, macd_signal, macd_hist,
-                 rsi_6, rsi_12, rsi_24, kdj_k, kdj_d, kdj_j, boll_upper, boll_mid, boll_lower,
-                 atr, obv, high_52w, low_52w, position_pct, year_change_pct, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
+            valid_rows.append((
                 code,
                 item['data_date'],
                 item['ma5'],
@@ -290,10 +303,26 @@ def save_technical_data(conn: sqlite3.Connection, code: str, technical_items: Li
                 item['year_change_pct'],
                 item['created_at'],
             ))
-        except Exception as e:
-            print(f"  保存技术指标失败 {code} {item['data_date']}: {e}")
+        except (KeyError, TypeError, ValueError) as e:
+            error_count += 1
+            if error_count <= 5:
+                print(f"  保存技术指标失败 {code}: {e}")
     
-    conn.commit()
+    if valid_rows:
+        try:
+            cursor.executemany('''
+                INSERT OR REPLACE INTO stock_technical
+                (code, data_date, ma5, ma10, ma20, ma60, ema12, ema26, macd, macd_signal, macd_hist,
+                 rsi_6, rsi_12, rsi_24, kdj_k, kdj_d, kdj_j, boll_upper, boll_mid, boll_lower,
+                 atr, obv, high_52w, low_52w, position_pct, year_change_pct, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', valid_rows)
+            conn.commit()
+        except sqlite3.Error as e:
+            print(f"  批量保存技术指标失败 {code}: {e}")
+    
+    if error_count > 5:
+        print(f"  保存技术指标共有 {error_count} 条失败记录")
 
 
 def get_stock_info(conn: sqlite3.Connection, code: str) -> Optional[Dict[str, Any]]:

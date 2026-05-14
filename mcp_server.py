@@ -539,8 +539,12 @@ class StockPoolServer:
                 self.update_stock(code, days=250, delay=0, force=True)
                 with self._get_connection() as conn:
                     data = storage_get_stock_info(conn, code)
-            except Exception:
-                pass
+            except (ValidationError, ProviderError) as e:
+                logger.warning(f"自动刷新股票信息失败 {code}: {e.message}", code=code)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"网络错误，使用缓存数据 {code}: {e}", code=code)
+            except Exception as e:
+                logger.error(f"未预期的错误 {code}: {e}", exc_info=True, code=code)
 
         return data
 
@@ -555,8 +559,12 @@ class StockPoolServer:
                 self.update_stock(code, days=250, delay=0, force=not data)
                 with self._get_connection() as conn:
                     data = storage_get_daily_data(conn, code, start_date, end_date, limit, offset)
-            except Exception:
-                pass
+            except (ValidationError, ProviderError) as e:
+                logger.warning(f"自动刷新日K数据失败 {code}: {e.message}", code=code)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"网络错误，使用缓存数据 {code}: {e}", code=code)
+            except Exception as e:
+                logger.error(f"未预期的错误 {code}: {e}", exc_info=True, code=code)
 
         if offset == 0 and include_realtime and self._request_includes_today(start_date, end_date):
             time_info = self.get_current_time_info()
@@ -582,8 +590,12 @@ class StockPoolServer:
                 self.update_stock(code, days=250, delay=0, force=not data)
                 with self._get_connection() as conn:
                     data = storage_get_valuation_data(conn, code, start_date, end_date, limit, offset)
-            except Exception:
-                pass
+            except (ValidationError, ProviderError) as e:
+                logger.warning(f"自动刷新估值数据失败 {code}: {e.message}", code=code)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"网络错误，使用缓存数据 {code}: {e}", code=code)
+            except Exception as e:
+                logger.error(f"未预期的错误 {code}: {e}", exc_info=True, code=code)
 
         return data
 
@@ -598,8 +610,12 @@ class StockPoolServer:
                 self.update_stock(code, days=250, delay=0, force=not data)
                 with self._get_connection() as conn:
                     data = storage_get_technical_data(conn, code, start_date, end_date, limit, offset)
-            except Exception:
-                pass
+            except (ValidationError, ProviderError) as e:
+                logger.warning(f"自动刷新技术指标失败 {code}: {e.message}", code=code)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"网络错误，使用缓存数据 {code}: {e}", code=code)
+            except Exception as e:
+                logger.error(f"未预期的错误 {code}: {e}", exc_info=True, code=code)
 
         return data
 
@@ -614,8 +630,12 @@ class StockPoolServer:
                 self._fetch_and_save_fund_flow(code, 100)
                 with self._get_connection() as conn:
                     data = storage_get_fund_flow_data(conn, code, start_date, end_date, limit, offset)
-            except Exception:
-                pass
+            except (ValidationError, ProviderError) as e:
+                logger.warning(f"自动刷新资金流向失败 {code}: {e.message}", code=code)
+            except (ConnectionError, TimeoutError) as e:
+                logger.warning(f"网络错误，使用缓存数据 {code}: {e}", code=code)
+            except Exception as e:
+                logger.error(f"未预期的错误 {code}: {e}", exc_info=True, code=code)
 
         return data
 
@@ -967,8 +987,14 @@ class StockPoolServer:
                 try:
                     self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
                     refreshed['success'] += 1
+                except (ValidationError, ProviderError) as e:
+                    logger.warning(f"筛选刷新失败 {code}: {e.message}", code=code, error_code=e.error_code)
+                    refreshed['failed'] += 1
+                except (ConnectionError, TimeoutError) as e:
+                    logger.warning(f"网络错误 {code}: {e}", code=code)
+                    refreshed['failed'] += 1
                 except Exception as e:
-                    _log(f"  筛选刷新失败 {code}: {e}")
+                    logger.error(f"筛选刷新未预期的错误 {code}: {e}", exc_info=True, code=code)
                     refreshed['failed'] += 1
 
         snapshots = self.get_latest_data(codes, include_realtime=False, batch_size=batch_size)
@@ -1065,11 +1091,21 @@ class StockPoolServer:
                 else:
                     self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
                     summary['refreshed'] += 1
+            except (ValidationError, ProviderError) as e:
+                summary['failed'] += 1
+                if len(summary['failures']) < 20:
+                    summary['failures'].append({'code': code, 'error': e.message, 'error_code': e.error_code})
+                logger.warning(f"市场同步失败 {code}: {e.message}", code=code, error_code=e.error_code)
+            except (ConnectionError, TimeoutError) as e:
+                summary['failed'] += 1
+                if len(summary['failures']) < 20:
+                    summary['failures'].append({'code': code, 'error': str(e), 'error_type': 'network'})
+                logger.warning(f"网络错误 {code}: {e}", code=code)
             except Exception as e:
                 summary['failed'] += 1
                 if len(summary['failures']) < 20:
-                    summary['failures'].append({'code': code, 'error': str(e)})
-                _log(f"  市场同步失败 {code}: {e}")
+                    summary['failures'].append({'code': code, 'error': str(e), 'error_type': 'unexpected'})
+                logger.error(f"市场同步未预期的错误 {code}: {e}", exc_info=True, code=code)
 
         summary['current_code'] = None
         return summary
