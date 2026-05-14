@@ -258,6 +258,34 @@ class StockPoolServer:
         return result
 
     @staticmethod
+    def _normalize_codes_argument(codes_arg, field='codes'):
+        if not codes_arg:
+            raise ValidationError("缺少股票代码列表", field=field)
+        if isinstance(codes_arg, str):
+            stripped = codes_arg.strip()
+            if stripped.startswith('['):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    raise ValidationError("股票代码列表不是有效的JSON数组", field=field, value=codes_arg)
+                if not isinstance(parsed, list):
+                    raise ValidationError("股票代码列表必须是数组", field=field, value=codes_arg)
+                codes = parsed
+            else:
+                codes = [stripped]
+        else:
+            codes = list(codes_arg)
+
+        cleaned = []
+        for code in codes:
+            code = str(code).strip()
+            if code:
+                cleaned.append(code)
+        if not cleaned:
+            raise ValidationError("缺少股票代码列表", field=field)
+        return cleaned
+
+    @staticmethod
     def _chunked(items, size):
         size = max(1, int(size or 1))
         for i in range(0, len(items), size):
@@ -307,13 +335,7 @@ class StockPoolServer:
         return create_success_response(self.get_current_time_info())
 
     def _handle_get_realtime_quotes(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        codes_arg = arguments.get('codes')
-        if not codes_arg:
-            raise ValidationError("缺少股票代码", field='codes')
-        if isinstance(codes_arg, str):
-            codes = [codes_arg]
-        else:
-            codes = list(codes_arg)
+        codes = self._normalize_codes_argument(arguments.get('codes'), field='codes')
         if len(codes) > 5:
             raise ValidationError("单次最多5只股票；大量股票请由agent分批遍历", field='codes', value=len(codes))
         results = self.pool.get_realtime_prices(codes, 0.2)
@@ -371,11 +393,14 @@ class StockPoolServer:
 
         data = self.pool.get_fund_flow(code, start_date, end_date, limit)
         if not data:
+            self.pool.update_fund_flow(code, days=max(limit, 30), delay=0)
+            data = self.pool.get_fund_flow(code, start_date, end_date, limit)
+        if not data:
             return create_error_response(
-                message=f"未获取到 {code} 的资金流向数据。该股票可能暂无资金流向记录",
+                message=f"未获取到 {code} 的资金流向数据。可能是数据源暂时不可用或该股票暂无资金流向记录",
                 error_code='DATA_NOT_FOUND',
                 recoverable=True,
-                suggested_action="请检查股票代码是否正确。部分小盘股/新股可能无资金流向数据",
+                suggested_action="请检查股票代码是否正确，稍后重试；部分小盘股/新股可能无资金流向数据",
             )
         
         analysis = self.pool.analyze_main_force(code, limit)
@@ -423,9 +448,7 @@ class StockPoolServer:
             return self._make_data_error(code, result, '财务数据')
 
     def _handle_analyze_position(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        codes = arguments.get('codes', [])
-        if not codes:
-            raise ValidationError("缺少股票代码列表", field='codes')
+        codes = self._normalize_codes_argument(arguments.get('codes'), field='codes')
         if len(codes) > 20:
             raise ValidationError("单次最多20只股票；大量候选请由agent分批遍历", field='codes', value=len(codes))
         result = self.pool.analyze_position(codes)
@@ -438,6 +461,9 @@ class StockPoolServer:
         fund_flow_days = self._normalize_positive_int(arguments.get('fund_flow_days', 10), 10, 20) or 10
 
         indicators = self.pool.get_technical_data(code)
+        if not indicators:
+            self.pool.update_stock(code, days=250, delay=0)
+            indicators = self.pool.get_technical_data(code)
         if not indicators:
             return create_error_response(
                 message=f"未获取到 {code} 的技术指标数据，无法进行分析",
@@ -517,9 +543,7 @@ class StockPoolServer:
         return create_success_response(result)
 
     def _handle_get_latest_data(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        codes = arguments.get('codes', [])
-        if not codes:
-            raise ValidationError("缺少股票代码列表", field='codes')
+        codes = self._normalize_codes_argument(arguments.get('codes'), field='codes')
         if len(codes) > 10:
             raise ValidationError("单次最多10只股票；大量股票请由agent分批遍历", field='codes', value=len(codes))
         include_realtime = arguments.get('include_realtime', False)

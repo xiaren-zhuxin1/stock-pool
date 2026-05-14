@@ -648,7 +648,7 @@ def save_fund_flow_data(conn: sqlite3.Connection, code: str, fund_flow_items: Li
     for item in fund_flow_items:
         try:
             parts = item.split(',')
-            if len(parts) < 13:
+            if len(parts) < 6:
                 continue
             
             data_date = parts[0]
@@ -657,11 +657,7 @@ def save_fund_flow_data(conn: sqlite3.Connection, code: str, fund_flow_items: Li
             mid_net_inflow = float(parts[3]) if parts[3] and parts[3] != '-' else None
             big_net_inflow = float(parts[4]) if parts[4] and parts[4] != '-' else None
             super_net_inflow = float(parts[5]) if parts[5] and parts[5] != '-' else None
-            main_net_inflow_pct = float(parts[6]) if parts[6] and parts[6] != '-' else None
-            small_net_inflow_pct = float(parts[7]) if parts[7] and parts[7] != '-' else None
-            mid_net_inflow_pct = float(parts[8]) if parts[8] and parts[8] != '-' else None
-            big_net_inflow_pct = float(parts[9]) if parts[9] and parts[9] != '-' else None
-            super_net_inflow_pct = float(parts[10]) if parts[10] and parts[10] != '-' else None
+            main_net_inflow_pct = float(parts[6]) if len(parts) > 6 and parts[6] and parts[6] != '-' else None
             
             cursor.execute('''
                 INSERT OR REPLACE INTO stock_fund_flow 

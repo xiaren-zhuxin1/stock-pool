@@ -124,6 +124,14 @@ class TestMCPToolBoundaries(unittest.TestCase):
             self.assertIn('最多', error_msg.get('message', ''))
         else:
             self.assertIn('最多', str(error_msg))
+
+        json_codes = json.dumps([f'{i:06d}' for i in range(11)])
+        json_result = mcp_server.handle_tool_call('get_latest_data', {'codes': json_codes})
+        self.assertFalse(json_result['success'])
+
+        realtime_codes = json.dumps([f'{i:06d}' for i in range(6)])
+        realtime_result = mcp_server.handle_tool_call('get_realtime_quotes', {'codes': realtime_codes})
+        self.assertFalse(realtime_result['success'])
         print("  超量请求被正确拒绝")
 
     def test_analyze_stock(self):
@@ -493,6 +501,24 @@ class TestStockDataPool(unittest.TestCase):
         self.assertEqual(result['error_code'], 'UNSUPPORTED_SCREEN_PARAMETER')
         self.assertEqual(len(calls), 0)
         print("  screen_market 未触发本地刷新")
+
+    def test_fund_flow_saves_eastmoney_six_field_rows(self):
+        print("\n[测试] 东方财富6字段资金流保存")
+        pool = StockDataPool(':memory:')
+        rows = [
+            '2026-05-13,1000.0,-200.0,-800.0,300.0,700.0',
+            '2026-05-14,-500.0,100.0,400.0,-200.0,-300.0',
+        ]
+
+        saved = pool.save_fund_flow_data('000001', rows)
+        data = pool.get_fund_flow('000001', limit=10)
+
+        self.assertEqual(saved, 2)
+        self.assertEqual(len(data), 2)
+        self.assertEqual(data[0]['data_date'], '2026-05-14')
+        self.assertEqual(data[0]['main_net_inflow'], -500.0)
+        self.assertIsNone(data[0]['main_net_inflow_pct'])
+        print("  6字段资金流已保存")
 
     def test_sync_market_refreshes_only_needed_codes(self):
         print("\n[测试] 市场同步只刷新需要补齐的股票")
