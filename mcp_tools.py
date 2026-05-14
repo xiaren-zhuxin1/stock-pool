@@ -156,13 +156,13 @@ TOOLS = [
     },
     {
         "name": "screen_market",
-        "description": "按估值、市值、52周位置筛选全市场股票。PE/PB/市值从东方财富API实时获取，52周位置从本地数据库获取。覆盖5000+只股票，需至少一个筛选条件。默认返回50条，最多200条；结果超过200条时用offset分页获取下一批。",
+        "description": "按估值、市值、52周位置筛选全市场股票。PE/PB/市值实时获取，52周位置基于历史数据计算。覆盖5000+只股票，需至少一个筛选条件。默认返回50条，最多200条；结果超过200条时用offset分页获取下一批。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
-                "position_min": {"type": "number", "description": "52周位置下限(%)，依赖本地数据库"},
-                "position_max": {"type": "number", "description": "52周位置上限(%)，依赖本地数据库"},
+                "position_min": {"type": "number", "description": "52周位置下限(%)"},
+                "position_max": {"type": "number", "description": "52周位置上限(%)"},
                 "pe_ttm_min": {"type": "number", "description": "市盈率TTM下限(正值，负PE即亏损自动排除)"},
                 "pe_ttm_max": {"type": "number", "description": "市盈率TTM上限(正值，负PE即亏损自动排除)"},
                 "pb_min": {"type": "number", "description": "市净率下限"},

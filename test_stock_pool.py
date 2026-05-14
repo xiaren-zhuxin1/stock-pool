@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from stock_pool.stock_pool import StockDataPool
 from stock_pool import mcp_server
 from stock_pool.provider_manager import ProviderManager
+from stock_pool.providers.base import ProviderResult
 
 
 class TestProviderManager(unittest.TestCase):
@@ -37,7 +38,7 @@ class TestProviderManager(unittest.TestCase):
     def test_realtime_quote(self):
         print("\n[测试] 实时行情获取")
         for code in self.test_codes[:1]:
-            result = self.manager.get_realtime_quote(code)
+            result = self.manager.fetch_realtime(code)
             if result.success:
                 print(f"  {code}: {result.data.get('name', 'N/A')}")
             else:
@@ -80,8 +81,9 @@ class TestMCPToolBoundaries(unittest.TestCase):
         self.assertNotIn('cache', public_text)
         self.assertNotIn('缓存', public_text)
         self.assertNotIn('uses_prepared_data', public_text)
-        self.assertEqual(public_result['data'][0]['effective_price_source'], 'historical_close')
-        self.assertEqual(public_result['skipped']['missing_data'], 2)
+        self.assertNotIn('effective_price_source', public_text)
+        self.assertNotIn('skipped', public_text)
+        self.assertEqual(public_result['data'][0]['code'], '600000')
         print("  MCP对外契约未暴露存储实现细节")
 
     def test_mcp_tool_count(self):
@@ -92,7 +94,7 @@ class TestMCPToolBoundaries(unittest.TestCase):
         
         self.assertIn('screen_market', tool_names)
         self.assertIn('get_current_time', tool_names)
-        self.assertIn('get_realtime_quote', tool_names)
+        self.assertIn('get_realtime_quotes', tool_names)
         self.assertIn('analyze_stock', tool_names)
         
         self.assertNotIn('get_cache_stats', tool_names)
@@ -105,7 +107,11 @@ class TestMCPToolBoundaries(unittest.TestCase):
         print("\n[测试] 市场筛选需要条件")
         no_filter_screen = mcp_server.handle_tool_call('screen_market', {})
         self.assertFalse(no_filter_screen['success'])
-        self.assertIn('筛选条件', no_filter_screen.get('error', ''))
+        error_msg = no_filter_screen.get('error', {})
+        if isinstance(error_msg, dict):
+            self.assertIn('筛选条件', error_msg.get('message', ''))
+        else:
+            self.assertIn('筛选条件', str(error_msg))
         print("  无条件筛选被正确拒绝")
 
     def test_get_latest_data_limit(self):
@@ -113,7 +119,11 @@ class TestMCPToolBoundaries(unittest.TestCase):
         codes = [f'{i:06d}' for i in range(35)]
         result = mcp_server.handle_tool_call('get_latest_data', {'codes': codes})
         self.assertFalse(result['success'])
-        self.assertIn('最多', result.get('error', ''))
+        error_msg = result.get('error', {})
+        if isinstance(error_msg, dict):
+            self.assertIn('最多', error_msg.get('message', ''))
+        else:
+            self.assertIn('最多', str(error_msg))
         print("  超量请求被正确拒绝")
 
     def test_analyze_stock(self):
@@ -296,22 +306,19 @@ class TestStockDataPool(unittest.TestCase):
             def __init__(self):
                 self.realtime_calls = []
 
-            def fetch_stock_universe(self, board='main', limit=None, page_size=100):
+            def fetch_stock_list(self, board='main', limit=None, page_size=100):
                 codes = ['000001', '000002', '000003']
                 if limit:
                     codes = codes[:limit]
-                return {
-                    'board': board,
-                    'source': 'fake',
-                    'total': 3,
-                    'returned': len(codes),
-                    'stocks': [{'code': code} for code in codes],
-                    'codes': codes,
-                }
+                return ProviderResult(
+                    success=True,
+                    data=[{'code': code} for code in codes],
+                    provider_name='fake'
+                )
 
             def fetch_realtime(self, code):
                 self.realtime_calls.append(code)
-                return None, None
+                return ProviderResult(success=False, data=None, provider_name='fake')
 
         pool.api = FakeAPI()
 
@@ -415,12 +422,20 @@ class TestStockDataPool(unittest.TestCase):
         calls = []
 
         class FakeAPI:
-            def fetch_stock_universe(self, board='a_share', limit=None, page_size=100):
+            def fetch_stock_list(self, board='a_share', limit=None, page_size=100):
                 codes = [f'000{i:03d}' for i in range(250)]
-                return {'board': board, 'source': 'fake', 'total': 250, 'returned': 250, 'codes': codes, 'stocks': []}
+                return ProviderResult(
+                    success=True,
+                    data=[{'code': code} for code in codes],
+                    provider_name='fake'
+                )
 
             def fetch_realtime(self, code):
-                return {'name': code, 'price': 1, 'data_source': 'fake', 'data_quality': 'partial', 'missing_fields': []}, 'fake'
+                return ProviderResult(
+                    success=True,
+                    data={'name': code, 'price': 1},
+                    provider_name='fake'
+                )
 
         pool.api = FakeAPI()
 
@@ -446,15 +461,12 @@ class TestStockDataPool(unittest.TestCase):
         refreshed = []
 
         class FakeAPI:
-            def fetch_stock_universe(self, board='a_share', limit=None, page_size=100):
-                return {
-                    'board': board,
-                    'source': 'fake',
-                    'total': 3,
-                    'returned': 3,
-                    'codes': ['000001', '000002', '000003'],
-                    'stocks': [],
-                }
+            def fetch_stock_list(self, board='a_share', limit=None, page_size=100):
+                return ProviderResult(
+                    success=True,
+                    data=[{'code': c} for c in ['000001', '000002', '000003']],
+                    provider_name='fake'
+                )
 
         pool.api = FakeAPI()
 
@@ -515,15 +527,16 @@ class TestStockDataPool(unittest.TestCase):
         class FakeAPI:
             def fetch_realtime(self, code):
                 calls.append(code)
-                return {
-                    'name': '测试股票',
-                    'price': 12.34,
-                    'pe_ttm': 10.5,
-                    'pb': 1.2,
-                    'data_source': 'fake',
-                    'data_quality': 'full',
-                    'missing_fields': []
-                }, 'fake'
+                return ProviderResult(
+                    success=True,
+                    data={
+                        'name': '测试股票',
+                        'price': 12.34,
+                        'pe_ttm': 10.5,
+                        'pb': 1.2,
+                    },
+                    provider_name='fake'
+                )
 
         pool.api = FakeAPI()
         data = pool.get_realtime_price('000001')

@@ -1791,6 +1791,10 @@ class StockPoolServer:
 server = StockPoolServer()
 
 
+def handle_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    return server.handle_tool_call(name, arguments)
+
+
 async def handle_request(request):
     method = request.get("method")
     request_id = request.get("id")
