@@ -7,6 +7,13 @@ MCP工具定义 - 面向agent的精简接口
 3. 内部重试/降级/缓存不暴露给agent，只返回最终结果
 4. 错误提示明确：区分永久错误(代码错误)和临时错误(网络/限流)
 5. 工具精简合并，减少agent的选择负担
+
+工具分类（13个）：
+- 系统工具: get_current_time
+- 行情工具: get_realtime_quotes, get_daily_kline, get_minute_kline
+- 分析工具: analyze_stock, analyze_position, analyze_intraday
+- 数据工具: get_fund_flow, get_financial_data, get_latest_data, get_stock_detail
+- 筛选工具: screen_market, get_stock_list
 """
 
 TOOLS = [
@@ -22,26 +29,17 @@ TOOLS = [
 
     # ==================== 行情工具 ====================
     {
-        "name": "get_realtime_quote",
-        "description": "获取单只股票实时行情。返回价格、涨跌幅、成交量等。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "股票代码，如 601138"}
-            },
-            "required": ["code"]
-        }
-    },
-    {
         "name": "get_realtime_quotes",
-        "description": "批量获取实时行情。单次最多20只。",
+        "description": "获取实时行情。支持单只或多只股票，最多20只。返回价格、涨跌幅、成交量等。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "codes": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "股票代码列表，最多20只"
+                    "description": "股票代码，可以是单个代码如 '601138' 或列表如 ['601138', '600487']，最多20只",
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}}
+                    ]
                 }
             },
             "required": ["codes"]
@@ -75,17 +73,15 @@ TOOLS = [
         }
     },
 
-    # ==================== 估值与位置工具 ====================
+    # ==================== 分析工具 ====================
     {
-        "name": "get_valuation",
-        "description": "获取股票估值数据（PE、PB、市值等）。数据自动刷新。",
+        "name": "analyze_stock",
+        "description": "综合分析股票：技术面信号+收益风险指标+量价分析+支撑压力位+主力资金+估值评估。一次调用获取完整分析，无需分别查询多个工具。返回技术信号(金叉/死叉/超买超卖)、风险指标(夏普/索提诺/最大回撤)、支撑压力位、主力资金趋势、估值水平评估。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码"},
-                "start_date": {"type": "string", "description": "开始日期"},
-                "end_date": {"type": "string", "description": "结束日期"},
-                "limit": {"type": "integer", "description": "返回条数"}
+                "fund_flow_days": {"type": "integer", "description": "主力资金分析天数，默认10", "default": 10}
             },
             "required": ["code"]
         }
@@ -105,30 +101,30 @@ TOOLS = [
             "required": ["codes"]
         }
     },
+    {
+        "name": "analyze_intraday",
+        "description": "分析单只股票日内走势。先调用 get_current_time 确认交易时段。非交易时间会返回明确错误提示。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "股票代码，如 603993"},
+                "date": {"type": "string", "description": "分析日期，默认今天"}
+            },
+            "required": ["code"]
+        }
+    },
 
     # ==================== 资金流工具 ====================
     {
         "name": "get_fund_flow",
-        "description": "获取资金流向数据。返回主力、散户资金流入流出。数据自动刷新。",
+        "description": "获取资金流向数据及主力资金分析。返回主力/散户资金流入流出、连续流入/流出天数、趋势强度等。数据自动刷新。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "code": {"type": "string", "description": "股票代码"},
                 "start_date": {"type": "string", "description": "开始日期"},
                 "end_date": {"type": "string", "description": "结束日期"},
-                "limit": {"type": "integer", "description": "返回条数"}
-            },
-            "required": ["code"]
-        }
-    },
-    {
-        "name": "analyze_main_force",
-        "description": "分析主力资金动向。返回连续流入/流出天数、趋势强度等。数据自动刷新。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "股票代码"},
-                "days": {"type": "integer", "description": "分析天数，默认10", "default": 10}
+                "limit": {"type": "integer", "description": "返回条数，默认10", "default": 10}
             },
             "required": ["code"]
         }
@@ -182,36 +178,6 @@ TOOLS = [
         }
     },
 
-    # ==================== 技术指标工具 ====================
-    {
-        "name": "get_technical_indicators",
-        "description": "获取技术指标（均线、MACD、KDJ、BOLL等）。数据自动刷新。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "股票代码"},
-                "start_date": {"type": "string", "description": "开始日期"},
-                "end_date": {"type": "string", "description": "结束日期"},
-                "limit": {"type": "integer", "description": "返回条数"}
-            },
-            "required": ["code"]
-        }
-    },
-
-    # ==================== 综合分析工具 ====================
-    {
-        "name": "analyze_stock",
-        "description": "综合分析股票：技术面信号+收益风险指标+量价分析+支撑压力位+主力资金+估值评估。一次调用获取完整分析，无需分别查询多个工具。返回技术信号(金叉/死叉/超买超卖)、风险指标(夏普/索提诺/最大回撤)、支撑压力位、主力资金趋势、估值水平评估。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "股票代码"},
-                "fund_flow_days": {"type": "integer", "description": "主力资金分析天数，默认10", "default": 10}
-            },
-            "required": ["code"]
-        }
-    },
-
     # ==================== 财务数据工具 ====================
     {
         "name": "get_financial_data",
@@ -256,20 +222,6 @@ TOOLS = [
                 "code": {"type": "string", "description": "股票代码"},
                 "include_realtime": {"type": "boolean", "description": "包含实时行情", "default": True},
                 "fund_flow_days": {"type": "integer", "description": "主力资金分析天数", "default": 10}
-            },
-            "required": ["code"]
-        }
-    },
-
-    # ==================== 日内分析工具 ====================
-    {
-        "name": "analyze_intraday",
-        "description": "分析单只股票日内走势。先调用 get_current_time 确认交易时段。非交易时间会返回明确错误提示。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "股票代码，如 603993"},
-                "date": {"type": "string", "description": "分析日期，默认今天"}
             },
             "required": ["code"]
         }

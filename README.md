@@ -30,7 +30,7 @@
 3. 冷却期后自动恢复
 4. 所有数据源失败时返回明确错误
 
-## MCP工具列表
+## MCP工具列表 (13个)
 
 ### 系统工具
 
@@ -42,8 +42,7 @@
 
 | 工具 | 说明 | 限制 |
 |------|------|------|
-| get_realtime_quote | 获取单只股票实时行情 | - |
-| get_realtime_quotes | 批量获取实时行情 | 最多20只 |
+| get_realtime_quotes | 获取实时行情（支持单只或多只） | 最多20只 |
 | get_daily_kline | 获取日K线数据 | 自动刷新 |
 | get_minute_kline | 获取分钟K线数据 | 支持1/5/15/30/60分钟 |
 
@@ -53,16 +52,13 @@
 |------|------|
 | analyze_stock | **综合分析**：技术信号+风险指标+量价+支撑压力+主力资金+估值 |
 | analyze_position | 分析52周位置，判断高低位 |
-| analyze_main_force | 分析主力资金动向 |
 | analyze_intraday | 日内走势分析（仅交易时间） |
 
 ### 数据工具
 
 | 工具 | 说明 |
 |------|------|
-| get_valuation | 获取估值数据（PE、PB、市值） |
-| get_fund_flow | 获取资金流向数据 |
-| get_technical_indicators | 获取技术指标（MA、MACD、KDJ、BOLL等） |
+| get_fund_flow | 获取资金流向+主力资金分析 |
 | get_financial_data | 获取财务数据（利润表、资产负债表、现金流量表） |
 | get_latest_data | 批量获取综合数据（行情+估值+位置） |
 | get_stock_detail | 获取股票详情（基本信息+行情+资金流） |

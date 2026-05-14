@@ -1449,20 +1449,14 @@ class StockPoolServer:
     def _handle_get_current_time(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return create_success_response(self.get_current_time_info())
 
-    def _handle_get_realtime_quote(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        result = self.provider_manager.fetch_realtime(code)
-        if result.success:
-            return create_success_response(result.data)
-        else:
-            return self._make_data_error(code, result, '实时行情')
-
     def _handle_get_realtime_quotes(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        codes = arguments.get('codes', [])
-        if not codes:
-            raise ValidationError("缺少股票代码列表", field='codes')
+        codes_arg = arguments.get('codes')
+        if not codes_arg:
+            raise ValidationError("缺少股票代码", field='codes')
+        if isinstance(codes_arg, str):
+            codes = [codes_arg]
+        else:
+            codes = list(codes_arg)
         if len(codes) > 20:
             raise ValidationError("单次最多20只股票", field='codes', value=len(codes))
         results = self.get_realtime_prices(codes, 0.2)
@@ -1510,31 +1504,13 @@ class StockPoolServer:
             )
         return create_success_response(data)
 
-    def _handle_get_valuation(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        start_date = arguments.get('start_date')
-        end_date = arguments.get('end_date')
-        limit = arguments.get('limit')
-
-        data = self.get_valuation_data(code, start_date, end_date, limit)
-        if not data:
-            return create_error_response(
-                message=f"未获取到 {code} 的估值数据",
-                error_code='DATA_NOT_FOUND',
-                recoverable=True,
-                suggested_action="请检查股票代码是否正确，或稍后重试",
-            )
-        return create_success_response(data)
-
     def _handle_get_fund_flow(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
         if not code:
             raise ValidationError("缺少股票代码", field='code')
         start_date = arguments.get('start_date')
         end_date = arguments.get('end_date')
-        limit = arguments.get('limit')
+        limit = arguments.get('limit', 10)
 
         data = self.get_fund_flow(code, start_date, end_date, limit)
         if not data:
@@ -1544,7 +1520,14 @@ class StockPoolServer:
                 recoverable=True,
                 suggested_action="请检查股票代码是否正确。部分小盘股/新股可能无资金流向数据",
             )
-        return create_success_response(data)
+        
+        analysis = self.analyze_main_force(code, limit)
+        result = {
+            'code': code,
+            'fund_flow': data,
+            'analysis': analysis if analysis.get('success') else None,
+        }
+        return create_success_response(result)
 
     def _handle_get_stock_list(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         board = arguments.get('board', 'a_share')
@@ -1595,24 +1578,6 @@ class StockPoolServer:
             raise ValidationError("单次最多100只股票", field='codes', value=len(codes))
         result = self.analyze_position(codes)
         return create_success_response(result)
-
-    def _handle_get_technical_indicators(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        start_date = arguments.get('start_date')
-        end_date = arguments.get('end_date')
-        limit = arguments.get('limit')
-
-        data = self.get_technical_data(code, start_date, end_date, limit)
-        if not data:
-            return create_error_response(
-                message=f"未获取到 {code} 的技术指标数据",
-                error_code='DATA_NOT_FOUND',
-                recoverable=True,
-                suggested_action="请检查股票代码是否正确，或稍后重试",
-            )
-        return create_success_response(data[-50:] if len(data) > 50 else data)
 
     def _handle_analyze_stock(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -1782,22 +1747,6 @@ class StockPoolServer:
                 suggested_action=suggested_action,
             )
 
-    def _handle_analyze_main_force(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        code = arguments.get('code')
-        if not code:
-            raise ValidationError("缺少股票代码", field='code')
-        days = arguments.get('days', 10)
-        result = self.analyze_main_force(code, days)
-        if result.get('success'):
-            return create_success_response(result)
-        else:
-            return create_error_response(
-                message=f"无法分析 {code} 的主力资金动向: {result.get('error', '无资金流向数据')}",
-                error_code='DATA_NOT_FOUND',
-                recoverable=True,
-                suggested_action="部分小盘股/新股可能无资金流向数据，请检查股票代码",
-            )
-
     def _handle_screen_market(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self.screen_market(arguments)
 
@@ -1806,21 +1755,17 @@ class StockPoolServer:
     def handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         handlers = {
             'get_current_time': self._handle_get_current_time,
-            'get_realtime_quote': self._handle_get_realtime_quote,
             'get_realtime_quotes': self._handle_get_realtime_quotes,
             'get_daily_kline': self._handle_get_daily_kline,
             'get_minute_kline': self._handle_get_minute_kline,
-            'get_valuation': self._handle_get_valuation,
             'get_fund_flow': self._handle_get_fund_flow,
             'get_stock_list': self._handle_get_stock_list,
             'get_financial_data': self._handle_get_financial_data,
             'analyze_position': self._handle_analyze_position,
-            'get_technical_indicators': self._handle_get_technical_indicators,
             'analyze_stock': self._handle_analyze_stock,
             'get_latest_data': self._handle_get_latest_data,
             'get_stock_detail': self._handle_get_stock_detail,
             'analyze_intraday': self._handle_analyze_intraday,
-            'analyze_main_force': self._handle_analyze_main_force,
             'screen_market': self._handle_screen_market,
         }
 
