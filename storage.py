@@ -162,6 +162,19 @@ def init_database_schema(conn: sqlite3.Connection) -> None:
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_code_time ON stock_minute(code, data_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_time ON stock_minute(data_time)')
     
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sync_jobs (
+            job_id TEXT PRIMARY KEY,
+            job_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            args TEXT,
+            progress TEXT,
+            error TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    ''')
+    
     ensure_column(cursor, 'stock_technical', 'atr', 'REAL')
     ensure_column(cursor, 'stock_technical', 'obv', 'REAL')
     
@@ -770,3 +783,60 @@ def get_latest_fund_flow(conn: sqlite3.Connection, codes: List[str]) -> List[Dic
         })
     
     return results
+
+
+def save_sync_job(conn: sqlite3.Connection, job: Dict[str, Any]) -> None:
+    cursor = conn.cursor()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    cursor.execute('''
+        INSERT OR REPLACE INTO sync_jobs 
+        (job_id, job_type, status, args, progress, error, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        job['job_id'],
+        job.get('job_type', 'sync'),
+        job['status'],
+        json.dumps(job.get('args', {}), ensure_ascii=False),
+        json.dumps(job.get('progress', {}), ensure_ascii=False),
+        job.get('error'),
+        job.get('created_at', now),
+        job.get('updated_at', now)
+    ))
+    
+    conn.commit()
+
+
+def get_sync_job(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[str, Any]]:
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM sync_jobs WHERE job_id = ?', (job_id,))
+    row = cursor.fetchone()
+    
+    if row:
+        return {
+            'job_id': row[0],
+            'job_type': row[1],
+            'status': row[2],
+            'args': json.loads(row[3]) if row[3] else {},
+            'progress': json.loads(row[4]) if row[4] else {},
+            'error': row[5],
+            'created_at': row[6],
+            'updated_at': row[7]
+        }
+    return None
+
+
+def mark_running_sync_jobs_interrupted(conn: sqlite3.Connection, timestamp: str) -> int:
+    cursor = conn.cursor()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    cursor.execute('''
+        UPDATE sync_jobs 
+        SET status = 'interrupted', 
+            error = '服务重启导致任务中断',
+            updated_at = ?
+        WHERE status = 'running'
+    ''', (now,))
+    
+    conn.commit()
+    return cursor.rowcount

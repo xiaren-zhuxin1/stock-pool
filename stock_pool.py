@@ -37,6 +37,9 @@ try:
         get_fund_flow_data as storage_get_fund_flow_data,
         get_daily_data_for_technical,
         check_data_freshness as storage_check_data_freshness,
+        save_sync_job as storage_save_sync_job,
+        get_sync_job as storage_get_sync_job,
+        mark_running_sync_jobs_interrupted as storage_mark_running_sync_jobs_interrupted,
     )
     from .minute_data import (
         save_minute_data as minute_save_minute_data,
@@ -63,6 +66,9 @@ except ImportError:
         get_fund_flow_data as storage_get_fund_flow_data,
         get_daily_data_for_technical,
         check_data_freshness as storage_check_data_freshness,
+        save_sync_job as storage_save_sync_job,
+        get_sync_job as storage_get_sync_job,
+        mark_running_sync_jobs_interrupted as storage_mark_running_sync_jobs_interrupted,
     )
     from minute_data import (
         save_minute_data as minute_save_minute_data,
@@ -87,6 +93,9 @@ except ImportError:
         get_fund_flow_data as storage_get_fund_flow_data,
         get_daily_data_for_technical,
         check_data_freshness as storage_check_data_freshness,
+        save_sync_job as storage_save_sync_job,
+        get_sync_job as storage_get_sync_job,
+        mark_running_sync_jobs_interrupted as storage_mark_running_sync_jobs_interrupted,
     )
     from minute_data import (
         save_minute_data as minute_save_minute_data,
@@ -1351,6 +1360,18 @@ class StockDataPool:
     
     def get_api_status(self):
         return self.api.get_api_status()
+
+    def save_sync_job(self, job: Dict[str, Any]) -> None:
+        with self._get_connection() as conn:
+            storage_save_sync_job(conn, job)
+
+    def get_sync_job(self, job_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            return storage_get_sync_job(conn, job_id)
+
+    def mark_running_sync_jobs_interrupted(self, timestamp: str) -> int:
+        with self._get_connection() as conn:
+            return storage_mark_running_sync_jobs_interrupted(conn, timestamp)
 
 
 if __name__ == '__main__':
