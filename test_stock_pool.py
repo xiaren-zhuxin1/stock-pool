@@ -432,6 +432,46 @@ class TestStockDataPool(unittest.TestCase):
         self.assertEqual(unsupported_result['error_code'], 'UNSUPPORTED_SCREEN_PARAMETER')
         print(f"  筛选命中: {[item['code'] for item in result['results']]}")
 
+    def test_get_latest_data_realtime_fallback_without_cache(self):
+        print("\n[test] get_latest_data falls back to realtime when cache is empty")
+        pool = StockDataPool(':memory:')
+
+        class FakeAPI:
+            def __init__(self):
+                self.realtime_calls = []
+
+            def fetch_realtime(self, code):
+                self.realtime_calls.append(code)
+                return ProviderResult(
+                    success=True,
+                    data={
+                        'code': code,
+                        'name': f'Test{code}',
+                        'price': 12.34,
+                        'pe_ttm': 18.5,
+                        'pb': 1.6,
+                        'market_cap': 1230000000,
+                        'high_52w': 20.0,
+                        'low_52w': 10.0,
+                        'data_source': 'fake',
+                        'data_quality': 'partial',
+                        'missing_fields': [],
+                    },
+                    provider_name='fake',
+                )
+
+        pool.api = FakeAPI()
+
+        latest = pool.get_latest_data(['001259'], include_realtime=True)
+
+        self.assertEqual(len(latest), 1)
+        self.assertEqual(latest[0]['code'], '001259')
+        self.assertEqual(latest[0]['name'], 'Test001259')
+        self.assertEqual(latest[0]['close'], 12.34)
+        self.assertEqual(latest[0]['effective_close'], 12.34)
+        self.assertTrue(latest[0]['realtime_used'])
+        self.assertEqual(pool.api.realtime_calls, ['001259'])
+
     def test_daily_refresh_uses_cache_gap(self):
         print("\n[测试] 日K刷新按缓存缺口增量拉取")
         today = '2026-05-07'

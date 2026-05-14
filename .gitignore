@@ -25,3 +25,5 @@ secure_config_example.py
 *.tmp
 *.bak
 token
+.mcp.json
+.codex-plugin/plugin.json
