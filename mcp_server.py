@@ -140,7 +140,7 @@ _SANITIZE_KEY_MAP = {
     'effective_price_source': _SANITIZE_DROP,
     'missing_fields': _SANITIZE_DROP,
     'data_quality': _SANITIZE_DROP,
-    'data_source': _SANITIZE_DROP,
+    '_internal_source': _SANITIZE_DROP,
     'realtime_skipped': _SANITIZE_DROP,
     'time_context': _SANITIZE_DROP,
     'kline_updated': _SANITIZE_DROP,
@@ -1040,13 +1040,13 @@ class StockPoolServer:
         }
 
     @performance_monitor
-    def _fetch_screener_data(self, board: str = 'a_share') -> List[Dict[str, Any]]:
+    def _fetch_screener_data(self, board: str = 'a_share') -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         cache_key = f"screener_{board}"
         cache_ttl = 14400
         cached_time = self._screener_cache_time.get(cache_key, 0)
         if cache_key in self._screener_cache and (time.time() - cached_time) < cache_ttl:
             logger.info(f"筛选缓存命中: {board}, {len(self._screener_cache[cache_key])}只")
-            return self._screener_cache[cache_key]
+            return self._screener_cache[cache_key], None
 
         board_map = {
             'a_share': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23',
@@ -1063,6 +1063,7 @@ class StockPoolServer:
         fields = 'f12,f14,f2,f3,f9,f23,f20,f115'
         all_stocks = []
         page = 1
+        last_error = None
         while True:
             params = {
                 'pn': str(page), 'pz': '200', 'po': '1', 'np': '1',
@@ -1076,6 +1077,13 @@ class StockPoolServer:
                                     timeout=15)
                 data = resp.json()
             except Exception as e:
+                error_msg = str(e)
+                is_rate_limited = 'Connection aborted' in error_msg or 'RemoteDisconnected' in error_msg
+                last_error = {
+                    'type': 'rate_limited' if is_rate_limited else 'network_error',
+                    'message': '东方财富API请求频率过高，已被临时限流' if is_rate_limited else f'网络请求失败: {error_msg}',
+                    'retry_after': 300 if is_rate_limited else 60,
+                }
                 if page == 1:
                     data = None
                     for retry in range(3):
@@ -1086,6 +1094,7 @@ class StockPoolServer:
                                                          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'},
                                                 timeout=15)
                             data = resp.json()
+                            last_error = None
                             break
                         except Exception as e2:
                             logger.warning(f"筛选API请求重试{retry+1}失败 page={page}: {e2}")
@@ -1144,7 +1153,68 @@ class StockPoolServer:
             self._screener_cache_time[cache_key] = time.time()
             logger.info(f"筛选数据已缓存: {board}, {len(all_stocks)}只, TTL={cache_ttl}s")
 
-        return all_stocks
+        return all_stocks, last_error
+
+    def _fetch_screener_from_db(self, board: str, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
+        board_sql = {
+            'a_share': "1=1",
+            'main': "code LIKE '60%' OR code LIKE '000%' OR code LIKE '001%'",
+            'gem': "code LIKE '300%'",
+            'star': "code LIKE '688%'",
+            'bse': "code LIKE '4%' OR code LIKE '8%'",
+            'hs_a': "1=1",
+        }
+        where_clauses = [board_sql.get(board, "1=1")]
+        params = []
+        
+        if filters.get('pe_ttm_min') is not None:
+            where_clauses.append("pe_ttm >= ?")
+            params.append(filters['pe_ttm_min'])
+        if filters.get('pe_ttm_max') is not None:
+            where_clauses.append("pe_ttm <= ? AND pe_ttm > 0")
+            params.append(filters['pe_ttm_max'])
+        if filters.get('pb_min') is not None:
+            where_clauses.append("pb >= ?")
+            params.append(filters['pb_min'])
+        if filters.get('pb_max') is not None:
+            where_clauses.append("pb <= ?")
+            params.append(filters['pb_max'])
+        if filters.get('market_cap_min') is not None:
+            where_clauses.append("market_cap >= ?")
+            params.append(filters['market_cap_min'])
+        if filters.get('market_cap_max') is not None:
+            where_clauses.append("market_cap <= ?")
+            params.append(filters['market_cap_max'])
+        
+        sql = f'''
+            SELECT v.code, i.name, i.market, v.pe_ttm, v.pb, v.market_cap
+            FROM stock_valuation v
+            JOIN stock_info i ON v.code = i.code
+            WHERE {' AND '.join(where_clauses)}
+            ORDER BY v.pe_ttm ASC
+            LIMIT 500
+        '''
+        
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, params)
+                rows = cursor.fetchall()
+                return [
+                    {
+                        'code': row[0],
+                        'name': row[1],
+                        'market': row[2],
+                        'pe_ttm': row[3],
+                        'pb': row[4],
+                        'market_cap': row[5],
+                        '_internal_source': 'local_db_fallback',
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.warning(f"从本地数据库获取筛选数据失败: {e}")
+            return []
 
     def screen_market(self, criteria: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         criteria = dict(criteria or {})
@@ -1170,9 +1240,30 @@ class StockPoolServer:
         if not has_filter and not criteria.get('allow_no_filters', False):
             return {'success': False, 'error': '市场筛选必须提供至少一个筛选条件，例如 position_max、pe_ttm_max、pb_max 或 market_cap_min。'}
 
-        all_stocks = self._fetch_screener_data(board)
+        all_stocks, api_error = self._fetch_screener_data(board)
+        
+        if not all_stocks and api_error:
+            need_pe_pb = filters['pe_ttm_min'] is not None or filters['pe_ttm_max'] is not None or \
+                         filters['pb_min'] is not None or filters['pb_max'] is not None
+            need_mcap = filters['market_cap_min'] is not None or filters['market_cap_max'] is not None
+            need_position = filters['position_min'] is not None or filters['position_max'] is not None
+            
+            if (need_pe_pb or need_mcap) and not need_position:
+                logger.info("API失败，尝试从本地数据库降级获取估值数据")
+                all_stocks = self._fetch_screener_from_db(board, filters)
+                if all_stocks:
+                    api_error = None
+        
         if not all_stocks:
-            return {'success': False, 'error': '无法获取市场筛选数据，请稍后重试'}
+            error_response = {
+                'success': False,
+                'error_type': api_error.get('type', 'unknown') if api_error else 'no_data',
+                'error': api_error.get('message', '无法获取市场筛选数据') if api_error else '无可用数据',
+            }
+            if api_error and api_error.get('retry_after'):
+                error_response['retry_after'] = api_error['retry_after']
+                error_response['suggestion'] = f"建议等待 {api_error['retry_after']} 秒后重试，或使用本地数据库筛选"
+            return error_response
 
         need_position = filters['position_min'] is not None or filters['position_max'] is not None
         position_map = {}
@@ -1239,10 +1330,14 @@ class StockPoolServer:
 
         matched_count = len(matched)
         has_more = (offset + limit) < matched_count
+        data_source = 'eastmoney_api'
+        if page and page[0].get('_internal_source') == 'local_db_fallback':
+            data_source = 'local_db_fallback'
 
         return {
             'success': True,
             'board': board,
+            'data_source': data_source,
             'matched_count': matched_count,
             'returned': len(page),
             'offset': offset, 'limit': limit, 'has_more': has_more,
