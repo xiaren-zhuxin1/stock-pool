@@ -50,7 +50,10 @@ class TestEastMoneyProvider(unittest.TestCase):
                 'f48': 100000000,
                 'f58': '测试股票',
                 'f170': 20.5,
-                'f164': 2.0,
+                'f152': 2,
+                'f162': 1050,
+                'f163': 980,
+                'f167': 120,
                 'f116': 10000000000,
             }
         })
@@ -59,6 +62,9 @@ class TestEastMoneyProvider(unittest.TestCase):
         result = self.provider.fetch_realtime('000001')
         self.assertTrue(result.success)
         self.assertEqual(result.data['price'], 10.00)
+        self.assertEqual(result.data['pe_ttm'], 10.5)
+        self.assertEqual(result.data['pe_lyr'], 9.8)
+        self.assertEqual(result.data['pb'], 1.2)
         self.assertEqual(result.data['name'], '测试股票')
 
     @patch('providers.base.requests.get')

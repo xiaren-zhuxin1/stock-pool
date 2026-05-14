@@ -76,12 +76,23 @@ class EastMoneyProvider(BaseProvider):
             market = '0'
         return f"{market}.{code}"
 
+    @staticmethod
+    def _scaled_quote_value(data: Dict[str, Any], field: str, scale_field: str = 'f152') -> Optional[float]:
+        value = data.get(field)
+        if value in (None, '', '-'):
+            return None
+        try:
+            scale = int(data.get(scale_field) or 0)
+            return float(value) / (10 ** scale)
+        except (TypeError, ValueError):
+            return None
+
     def fetch_realtime(self, code: str) -> ProviderResult:
         secid = self._get_market_code(code)
         url = "https://push2.eastmoney.com/api/qt/stock/get"
         params = {
             'secid': secid,
-            'fields': 'f57,f58,f43,f169,f170,f46,f44,f51,f168,f47,f48,f60,f45,f52,f50,f49,f171,f113,f114,f115,f117,f162,f163,f164,f165,f166,f167,f39,f40,f41,f71,f83,f84,f85,f86,f92,f93,f94,f95,f96,f107,f111,f116,f124,f1,f13',
+            'fields': 'f57,f58,f43,f169,f170,f46,f44,f51,f168,f47,f48,f60,f45,f52,f50,f49,f171,f113,f114,f115,f117,f152,f162,f163,f164,f165,f166,f167,f39,f40,f41,f71,f83,f84,f85,f86,f92,f93,f94,f95,f96,f107,f111,f116,f124,f1,f13',
             'ut': 'fa5fd1943c7b386f1722cd924488a4d8',
         }
 
@@ -109,9 +120,9 @@ class EastMoneyProvider(BaseProvider):
                 'volume': d.get('f47'),
                 'amount': d.get('f48'),
                 'change_pct': d.get('f170') / 100 if d.get('f170') else None,
-                'pe_ttm': d.get('f162'),
-                'pe_lyr': d.get('f163'),
-                'pb': d.get('f164'),
+                'pe_ttm': self._scaled_quote_value(d, 'f162'),
+                'pe_lyr': self._scaled_quote_value(d, 'f163'),
+                'pb': self._scaled_quote_value(d, 'f167'),
                 'market_cap': d.get('f116'),
                 'circ_market_cap': d.get('f117'),
                 'high_52w': d.get('f44') / 100 if d.get('f44') else None,
@@ -261,7 +272,7 @@ class EastMoneyProvider(BaseProvider):
             'invt': '2',
             'fid': 'f3',
             'fs': market,
-            'fields': 'f12,f14,f2,f3,f4,f5,f6,f7,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152',
+            'fields': 'f12,f14,f2,f3,f4,f5,f6,f7,f9,f15,f16,f17,f18,f20,f21,f23,f24,f25,f22,f11,f62,f128,f136,f115,f152',
         }
 
         result = self._json_request(url, params, referer='https://quote.eastmoney.com/', data_type=DataType.STOCK_LIST)
@@ -284,6 +295,13 @@ class EastMoneyProvider(BaseProvider):
                     'code': stock_code,
                     'name': item.get('f14'),
                     'market': 'SH' if stock_code.startswith('6') else ('BJ' if stock_code.startswith(('4', '8')) else 'SZ'),
+                    'close': item.get('f2'),
+                    'change_pct': item.get('f3'),
+                    'pe_ttm': item.get('f9') if item.get('f9') not in (None, '', '-') else item.get('f115'),
+                    'pb': item.get('f23'),
+                    'market_cap': item.get('f20'),
+                    'circ_market_cap': item.get('f21'),
+                    'data_source': self.name,
                 })
 
             return self._create_result(stocks, DataType.STOCK_LIST,

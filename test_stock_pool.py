@@ -307,12 +307,16 @@ class TestStockDataPool(unittest.TestCase):
                 self.realtime_calls = []
 
             def fetch_stock_list(self, board='main', limit=None, page_size=100):
-                codes = ['000001', '000002', '000003']
+                stocks = [
+                    {'code': '000001', 'name': '测试000001', 'market': 'SZ', 'close': 11, 'pe_ttm': 20, 'pb': 2.0, 'market_cap': 100000000000},
+                    {'code': '000002', 'name': '测试000002', 'market': 'SZ', 'close': 8, 'pe_ttm': 9, 'pb': 0.9, 'market_cap': 50000000000},
+                    {'code': '000003', 'name': '测试000003', 'market': 'SZ', 'close': 9, 'pe_ttm': 12, 'pb': 1.1, 'market_cap': 70000000000},
+                ]
                 if limit:
-                    codes = codes[:limit]
+                    stocks = stocks[:limit]
                 return ProviderResult(
                     success=True,
-                    data=[{'code': code} for code in codes],
+                    data=stocks,
                     provider_name='fake'
                 )
 
@@ -357,8 +361,7 @@ class TestStockDataPool(unittest.TestCase):
 
         result = pool.screen_market({
             'board': 'gem',
-            'position_max': 30,
-            'pe_ttm_max': 15,
+            'pe_ttm_max': 10,
             'limit': 10,
             'include_realtime': False,
         })
@@ -371,11 +374,47 @@ class TestStockDataPool(unittest.TestCase):
 
         ratio_result = pool.screen_market({
             'board': 'gem',
-            'position_max': 0.3,
+            'pb_max': 1.2,
             'limit': 10,
             'include_realtime': False,
         })
-        self.assertEqual(ratio_result['matched_count'], result['matched_count'])
+        self.assertEqual(ratio_result['matched_count'], 2)
+
+        market_cap_result = pool.screen_market({
+            'board': 'gem',
+            'market_cap_min': 600,
+            'limit': 10,
+        })
+        self.assertEqual([item['code'] for item in market_cap_result['results']], ['000003', '000001'])
+
+        class FailingListAPI:
+            realtime_calls = []
+
+            def fetch_stock_list(self, board='a_share', limit=None, page_size=100):
+                return ProviderResult(success=False, data=None, provider_name='fake')
+
+            def fetch_realtime(self, code):
+                self.realtime_calls.append(code)
+                return ProviderResult(success=False, data=None, provider_name='fake')
+
+        pool.api = FailingListAPI()
+        unavailable_result = pool.screen_market({
+            'board': 'a_share',
+            'pe_ttm_max': 15,
+            'limit': 10,
+            'include_realtime': False,
+        })
+        self.assertFalse(unavailable_result['success'])
+        self.assertEqual(unavailable_result['error_code'], 'UNIVERSE_UNAVAILABLE')
+
+        unsupported_result = pool.screen_market({
+            'board': 'a_share',
+            'position_max': 30,
+            'pe_ttm_max': 15,
+            'limit': 10,
+        })
+        self.assertFalse(unsupported_result['success'])
+        self.assertEqual(unsupported_result['error_code'], 'UNSUPPORTED_SCREEN_PARAMETER')
         print(f"  筛选命中: {[item['code'] for item in result['results']]}")
 
     def test_daily_refresh_uses_cache_gap(self):
@@ -416,8 +455,8 @@ class TestStockDataPool(unittest.TestCase):
         self.assertEqual(forced, 250)
         print(f"  厚缓存过期2天仅拉取: {stale_thick} 天")
 
-    def test_screen_market_refresh_default_is_bounded(self):
-        print("\n[测试] 市场筛选刷新默认受控")
+    def test_screen_market_rejects_refresh(self):
+        print("\n[测试] 市场筛选拒绝刷新缓存")
         pool = StockDataPool(':memory:')
         calls = []
 
@@ -444,16 +483,16 @@ class TestStockDataPool(unittest.TestCase):
 
         pool.update_stock = fake_update_stock
         result = pool.screen_market({
-            'position_max': 30,
+            'pe_ttm_max': 30,
             'refresh': 'missing',
             'delay': 0,
             'allow_no_filters': False,
         })
 
-        self.assertTrue(result['success'])
-        self.assertEqual(result['refresh']['attempted'], 200)
-        self.assertEqual(len(calls), 200)
-        print(f"  默认刷新上限: {result['refresh']['attempted']} 只")
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error_code'], 'UNSUPPORTED_SCREEN_PARAMETER')
+        self.assertEqual(len(calls), 0)
+        print("  screen_market 未触发本地刷新")
 
     def test_sync_market_refreshes_only_needed_codes(self):
         print("\n[测试] 市场同步只刷新需要补齐的股票")

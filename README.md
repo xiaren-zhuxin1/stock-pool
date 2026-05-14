@@ -8,7 +8,7 @@
 - **智能缓存**：LRU缓存 + 数据库缓存，减少API调用
 - **自动刷新**：数据过期自动拉取，无需手动更新
 - **专业分析**：技术指标、风险指标、主力资金、支撑压力位
-- **市场筛选**：按估值、市值、52周位置筛选全市场股票
+- **市场筛选**：按在线估值、市值筛选全市场股票，不使用本地缓存子集
 - **MCP协议**：支持AI模型直接调用
 
 ## 数据源
@@ -42,7 +42,7 @@
 
 | 工具 | 说明 | 限制 |
 |------|------|------|
-| get_realtime_quotes | 获取实时行情（支持单只或多只） | 最多20只 |
+| get_realtime_quotes | 获取实时行情（支持单只或小批量） | 最多5只 |
 | get_daily_kline | 获取日K线数据 | 自动刷新 |
 | get_minute_kline | 获取分钟K线数据 | 支持1/5/15/30/60分钟 |
 
@@ -60,15 +60,15 @@
 |------|------|
 | get_fund_flow | 获取资金流向+主力资金分析 |
 | get_financial_data | 获取财务数据（利润表、资产负债表、现金流量表） |
-| get_latest_data | 批量获取综合数据（行情+估值+位置） |
+| get_latest_data | 小批量获取综合数据（行情+估值+位置） |
 | get_stock_detail | 获取股票详情（基本信息+行情+资金流） |
 
 ### 筛选工具
 
 | 工具 | 说明 |
 |------|------|
-| screen_market | 按估值、市值、52周位置筛选全市场股票 |
-| get_stock_list | 获取板块股票列表 |
+| screen_market | 按在线估值、市值筛选全市场股票 |
+| get_stock_list | 分页获取板块股票列表 |
 
 ## 使用示例
 
@@ -91,9 +91,9 @@ position = pool.analyze_position(['601138', '600487'])
 # 市场筛选
 result = pool.screen_market({
     'board': 'a_share',
-    'position_max': 30,    # 52周位置上限30%
     'pe_ttm_max': 20,      # PE上限20倍
-    'limit': 50,
+    'market_cap_min': 100, # 总市值下限100亿
+    'limit': 20,
 })
 ```
 
@@ -109,18 +109,18 @@ result = pool.screen_market({
 // 市场筛选
 {"name": "screen_market", "arguments": {
     "board": "a_share",
-    "position_max": 30,
     "pe_ttm_max": 20,
-    "limit": 50
+    "market_cap_min": 100,
+    "limit": 20
 }}
 ```
 
 ## Agent使用规则
 
 1. **必须先调用 `get_current_time`**：确定分析截止日期和交易时段
-2. **全市场筛选必须用 `screen_market`**：并提供至少一个筛选条件
+2. **全市场估值/市值筛选用 `screen_market`**：并提供至少一个筛选条件；52周位置对候选股另用 `analyze_position`
 3. **个股分析用 `analyze_stock`**：一次调用获取完整分析
-4. **批量获取用 `get_latest_data`**：最多30只，大量请先筛选
+4. **小批量获取用 `get_latest_data`**：最多10只，大量由agent分批遍历
 
 ### 推荐流程
 
@@ -178,6 +178,6 @@ export TUSHARE_TOKEN=your_token
 ## 注意事项
 
 1. API有调用限制，建议设置适当延迟
-2. 52周位置依赖本地数据库，需先同步数据
+2. 52周位置依赖历史K线；不要用 `screen_market` 做全市场52周位置筛选，先筛候选再调用 `analyze_position`
 3. TuShare为付费服务，需配置Token
 4. 项目日志输出到stderr，不影响MCP通信

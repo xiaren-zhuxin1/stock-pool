@@ -856,13 +856,25 @@ class StockDataPool:
     def screen_market(self, criteria=None):
         criteria = dict(criteria or {})
         board = criteria.get('board') or criteria.get('market') or 'a_share'
-        limit = self._normalize_positive_int(criteria.get('limit'), 50, 200)
+        limit = self._normalize_positive_int(criteria.get('limit'), 20, 50)
         offset = self._normalize_positive_int(criteria.get('offset'), 0, 100000)
-        include_realtime = bool(criteria.get('include_realtime', False))
+
+        unsupported = [
+            key for key in ('position_min', 'position_max', 'refresh', 'days', 'delay', 'max_refresh')
+            if criteria.get(key) is not None
+        ]
+        if unsupported:
+            return {
+                'success': False,
+                'error': 'screen_market 是在线全市场估值/市值筛选工具，不支持历史位置筛选或自动刷新本地缓存。',
+                'error_code': 'UNSUPPORTED_SCREEN_PARAMETER',
+                'recoverable': False,
+                'unsupported_parameters': unsupported,
+                'suggested_action': '用 pe_ttm/pb/market_cap 在线筛出候选；需要52周位置时，对候选调用 analyze_position；需要补历史数据时，单独运行 sync_market。',
+                'board': board,
+            }
 
         filters = {
-            'position_min': self._to_number(criteria.get('position_min')),
-            'position_max': self._to_number(criteria.get('position_max')),
             'pe_ttm_min': self._to_number(criteria.get('pe_ttm_min')),
             'pe_ttm_max': self._to_number(criteria.get('pe_ttm_max')),
             'pb_min': self._to_number(criteria.get('pb_min')),
@@ -870,57 +882,51 @@ class StockDataPool:
             'market_cap_min': self._to_number(criteria.get('market_cap_min')),
             'market_cap_max': self._to_number(criteria.get('market_cap_max')),
         }
-        for key in ('position_min', 'position_max'):
-            if filters[key] is not None and 0 < filters[key] <= 1:
-                filters[key] *= 100
+        for key in ('market_cap_min', 'market_cap_max'):
+            if filters[key] is not None:
+                filters[key] *= 100000000
         has_filter = any(value is not None for value in filters.values())
         if not has_filter and not criteria.get('allow_no_filters', False):
             return {
                 'success': False,
-                'error': '市场筛选必须提供至少一个筛选条件，例如 position_max、pe_ttm_max、pb_max 或 market_cap_min。',
+                'error': '市场筛选必须提供至少一个筛选条件，例如 pe_ttm_max、pb_max 或 market_cap_min。',
             }
 
         universe_result = self.api.fetch_stock_list(board=board)
         if universe_result.success and universe_result.data:
-            codes = [s['code'] for s in universe_result.data]
+            universe_rows = list(universe_result.data)
         else:
-            codes = []
-
-        refresh_summary = None
-        refresh = criteria.get('refresh')
-        if refresh in ('missing', 'stale', 'force') and codes:
-            days = self._normalize_positive_int(criteria.get('days'), 250, 500) or 250
-            delay = self._to_number(criteria.get('delay'))
-            if delay is None:
-                delay = 0.2
-            max_refresh = self._normalize_positive_int(criteria.get('max_refresh'), 200, len(codes)) or 0
-            today = self.get_current_time_info()['date']
-            refresh_summary = {
-                'mode': refresh,
-                'attempted': 0,
-                'refreshed': 0,
-                'skipped_fresh': 0,
-                'failed': 0,
-                'max_refresh': max_refresh,
+            message = '选股需要实时获取全市场股票列表，当前数据源不可用；为避免本地缓存样本过少误导结果，已拒绝使用缓存筛选。'
+            if universe_result.error and universe_result.error.message:
+                message = f"{message} 数据源错误: {universe_result.error.message}"
+            return {
+                'success': False,
+                'error': message,
+                'error_code': 'UNIVERSE_UNAVAILABLE',
+                'recoverable': True,
+                'suggested_action': '稍后重试，或先运行市场同步补齐数据后再分析指定股票；不要把缓存子集当作全市场筛选结果。',
+                'board': board,
             }
-            for code in codes[:max_refresh]:
-                refresh_summary['attempted'] += 1
-                try:
-                    freshness = self.check_data_freshness(code, 'daily')
-                    if not self._needs_daily_refresh(freshness, refresh, today):
-                        refresh_summary['skipped_fresh'] += 1
-                        continue
-                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
-                    refresh_summary['refreshed'] += 1
-                except Exception:
-                    refresh_summary['failed'] += 1
 
-        snapshots = self.get_latest_data(codes, include_realtime=False)
+        snapshots = []
+        screen_date = self.get_current_time_info()['date']
+        for row in universe_rows:
+            snapshots.append({
+                'code': row.get('code'),
+                'name': row.get('name'),
+                'market': row.get('market'),
+                'date': screen_date,
+                'close': row.get('close'),
+                'change_pct': row.get('change_pct'),
+                'pe_ttm': row.get('pe_ttm'),
+                'pb': row.get('pb'),
+                'market_cap': row.get('market_cap'),
+                'circ_market_cap': row.get('circ_market_cap'),
+                'data_source': row.get('data_source') or getattr(universe_result, 'provider_name', None),
+            })
         matched = []
 
         for row in snapshots:
-            if not self._passes_range(row.get('position_pct'), filters['position_min'], filters['position_max']):
-                continue
             if not self._passes_range(row.get('pe_ttm'), filters['pe_ttm_min'], filters['pe_ttm_max']):
                 continue
             if not self._passes_range(row.get('pb'), filters['pb_min'], filters['pb_max']):
@@ -929,10 +935,10 @@ class StockDataPool:
                 continue
             matched.append(row)
 
-        sort_by = criteria.get('sort_by', 'position_pct')
-        allowed_sort = {'position_pct', 'pe_ttm', 'pb', 'market_cap', 'close', 'code', 'date'}
+        sort_by = criteria.get('sort_by', 'pe_ttm')
+        allowed_sort = {'pe_ttm', 'pb', 'market_cap', 'close', 'code', 'name', 'date'}
         if sort_by not in allowed_sort:
-            sort_by = 'position_pct'
+            sort_by = 'pe_ttm'
         reverse = criteria.get('sort_order', 'asc') == 'desc'
 
         non_null = [item for item in matched if item.get(sort_by) is not None]
@@ -940,14 +946,6 @@ class StockDataPool:
         non_null.sort(key=lambda item: item.get(sort_by), reverse=reverse)
         matched = non_null + null_items
         page = matched[offset:offset + limit]
-
-        if include_realtime and page:
-            realtime_rows = self.get_latest_data(
-                [item['code'] for item in page],
-                include_realtime=True,
-            )
-            by_code = {item['code']: item for item in realtime_rows}
-            page = [by_code.get(item['code'], item) for item in page]
 
         matched_count = len(matched)
         has_more = (offset + limit) < matched_count
@@ -969,8 +967,6 @@ class StockDataPool:
             },
             'results': page,
         }
-        if refresh_summary is not None:
-            result['refresh'] = refresh_summary
         return result
 
     def screen_main_board(self, criteria=None):

@@ -314,8 +314,8 @@ class StockPoolServer:
             codes = [codes_arg]
         else:
             codes = list(codes_arg)
-        if len(codes) > 20:
-            raise ValidationError("单次最多20只股票", field='codes', value=len(codes))
+        if len(codes) > 5:
+            raise ValidationError("单次最多5只股票；大量股票请由agent分批遍历", field='codes', value=len(codes))
         results = self.pool.get_realtime_prices(codes, 0.2)
         return create_success_response(results)
 
@@ -325,7 +325,7 @@ class StockPoolServer:
             raise ValidationError("缺少股票代码", field='code')
         start_date = arguments.get('start_date')
         end_date = arguments.get('end_date')
-        days = arguments.get('days', 250)
+        days = self._normalize_positive_int(arguments.get('days', 250), 250, 300) or 250
 
         data = self.pool.get_daily_data(code, start_date, end_date, limit=days)
         if not data:
@@ -342,7 +342,7 @@ class StockPoolServer:
         if not code:
             raise ValidationError("缺少股票代码", field='code')
         klt = arguments.get('klt', 5)
-        days = arguments.get('days', 5)
+        days = self._normalize_positive_int(arguments.get('days', 3), 3, 5) or 3
 
         time_info = self.pool.get_current_time_info()
         today = time_info['date']
@@ -367,7 +367,7 @@ class StockPoolServer:
             raise ValidationError("缺少股票代码", field='code')
         start_date = arguments.get('start_date')
         end_date = arguments.get('end_date')
-        limit = arguments.get('limit', 10)
+        limit = self._normalize_positive_int(arguments.get('limit', 10), 10, 30) or 10
 
         data = self.pool.get_fund_flow(code, start_date, end_date, limit)
         if not data:
@@ -388,8 +388,8 @@ class StockPoolServer:
 
     def _handle_get_stock_list(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         board = arguments.get('board', 'a_share')
-        page = arguments.get('page')
-        page_size = arguments.get('page_size', 100)
+        page = arguments.get('page') or 1
+        page_size = arguments.get('page_size', 50)
 
         result = self.pool.api.fetch_stock_list(board)
         if not result.success:
@@ -398,22 +398,17 @@ class StockPoolServer:
         stocks = result.data
         codes = [s['code'] for s in stocks]
 
-        if page:
-            page = max(1, page)
-            page_size = min(100, max(1, page_size))
-            start = (page - 1) * page_size
-            end = start + page_size
-            page_stocks = stocks[start:end]
-            page_codes = codes[start:end]
-            return create_success_response({
-                'stocks': page_stocks, 'codes': page_codes,
-                'total': len(stocks), 'page': page,
-                'page_size': page_size,
-                'total_pages': (len(stocks) + page_size - 1) // page_size,
-            })
-
+        page = self._normalize_positive_int(page, 1, 100000) or 1
+        page_size = self._normalize_positive_int(page_size, 50, 50) or 50
+        start = (page - 1) * page_size
+        end = start + page_size
+        page_stocks = stocks[start:end]
+        page_codes = codes[start:end]
         return create_success_response({
-            'stocks': stocks, 'codes': codes, 'total': len(stocks),
+            'stocks': page_stocks, 'codes': page_codes,
+            'total': len(stocks), 'page': page,
+            'page_size': page_size,
+            'total_pages': (len(stocks) + page_size - 1) // page_size,
         })
 
     def _handle_get_financial_data(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -431,8 +426,8 @@ class StockPoolServer:
         codes = arguments.get('codes', [])
         if not codes:
             raise ValidationError("缺少股票代码列表", field='codes')
-        if len(codes) > 100:
-            raise ValidationError("单次最多100只股票", field='codes', value=len(codes))
+        if len(codes) > 20:
+            raise ValidationError("单次最多20只股票；大量候选请由agent分批遍历", field='codes', value=len(codes))
         result = self.pool.analyze_position(codes)
         return create_success_response(result)
 
@@ -440,7 +435,7 @@ class StockPoolServer:
         code = arguments.get('code')
         if not code:
             raise ValidationError("缺少股票代码", field='code')
-        fund_flow_days = arguments.get('fund_flow_days', 10)
+        fund_flow_days = self._normalize_positive_int(arguments.get('fund_flow_days', 10), 10, 20) or 10
 
         indicators = self.pool.get_technical_data(code)
         if not indicators:
@@ -525,8 +520,8 @@ class StockPoolServer:
         codes = arguments.get('codes', [])
         if not codes:
             raise ValidationError("缺少股票代码列表", field='codes')
-        if len(codes) > 30:
-            raise ValidationError("单次最多30只股票", field='codes', value=len(codes))
+        if len(codes) > 10:
+            raise ValidationError("单次最多10只股票；大量股票请由agent分批遍历", field='codes', value=len(codes))
         include_realtime = arguments.get('include_realtime', False)
         results = self.pool.get_latest_data(codes, include_realtime=include_realtime)
         if not results:
@@ -543,7 +538,7 @@ class StockPoolServer:
         if not code:
             raise ValidationError("缺少股票代码", field='code')
         include_realtime = arguments.get('include_realtime', True)
-        fund_flow_days = arguments.get('fund_flow_days', 10)
+        fund_flow_days = self._normalize_positive_int(arguments.get('fund_flow_days', 10), 10, 20) or 10
 
         info = self.pool.get_stock_info(code)
         if not info:
