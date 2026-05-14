@@ -48,7 +48,7 @@ class TestProviderManager(unittest.TestCase):
     def test_daily_kline(self):
         print("\n[测试] 日K线获取")
         for code in self.test_codes[:1]:
-            result = self.manager.get_daily_kline(code, days=10)
+            result = self.manager.fetch_daily_kline(code, days=10)
             if result.success:
                 print(f"  {code}: {len(result.data)} 条K线")
             else:
@@ -654,7 +654,11 @@ class TestStockDataPool(unittest.TestCase):
 
             def fetch_minute_kline(self, code, klt, days):
                 self.calls.append((code, klt, days))
-                return ['2026-05-08 09:35,11,12,13,10,100,1200'], 'fake'
+                return ProviderResult(
+                    success=True,
+                    data=['2026-05-08 09:35,11,12,13,10,100,1200'],
+                    provider_name='fake',
+                )
 
         fake_api = FakeAPI()
         pool.api = fake_api
@@ -673,10 +677,14 @@ class TestStockDataPool(unittest.TestCase):
 
         class FakeAPI:
             def fetch_minute_kline(self, code, klt, days):
-                return [
-                    '2026-03-20 09:35,10,10,10,10,1,10',
-                    '2026-05-08 15:00,11,11,11,11,1,11',
-                ], 'fake'
+                return ProviderResult(
+                    success=True,
+                    data=[
+                        '2026-03-20 09:35,10,10,10,10,1,10',
+                        '2026-05-08 15:00,11,11,11,11,1,11',
+                    ],
+                    provider_name='fake',
+                )
 
         pool.api = FakeAPI()
         result = pool.update_minute_data(

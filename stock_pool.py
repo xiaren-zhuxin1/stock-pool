@@ -544,6 +544,25 @@ class StockDataPool:
                 logger.error(f"更新股票未预期的错误 {code}: {e}", exc_info=True, code=code)
                 results[code] = str(e)
         return results
+
+    def check_missing_data(self, codes: List[str], start_date: str, end_date: str) -> Dict[str, Dict[str, Any]]:
+        missing = {}
+        for code in self._unique_codes(codes):
+            rows = self.get_daily_data(
+                code,
+                start_date=start_date,
+                end_date=end_date,
+                limit=1,
+                include_realtime=False,
+            )
+            if not rows:
+                missing[code] = {
+                    'code': code,
+                    'start_date': start_date,
+                    'end_date': end_date,
+                    'reason': 'no_daily_data_in_range',
+                }
+        return missing
     
     def get_stock_info(self, code):
         conn = self._connect()
@@ -867,6 +886,35 @@ class StockDataPool:
         else:
             codes = []
 
+        refresh_summary = None
+        refresh = criteria.get('refresh')
+        if refresh in ('missing', 'stale', 'force') and codes:
+            days = self._normalize_positive_int(criteria.get('days'), 250, 500) or 250
+            delay = self._to_number(criteria.get('delay'))
+            if delay is None:
+                delay = 0.2
+            max_refresh = self._normalize_positive_int(criteria.get('max_refresh'), 200, len(codes)) or 0
+            today = self.get_current_time_info()['date']
+            refresh_summary = {
+                'mode': refresh,
+                'attempted': 0,
+                'refreshed': 0,
+                'skipped_fresh': 0,
+                'failed': 0,
+                'max_refresh': max_refresh,
+            }
+            for code in codes[:max_refresh]:
+                refresh_summary['attempted'] += 1
+                try:
+                    freshness = self.check_data_freshness(code, 'daily')
+                    if not self._needs_daily_refresh(freshness, refresh, today):
+                        refresh_summary['skipped_fresh'] += 1
+                        continue
+                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
+                    refresh_summary['refreshed'] += 1
+                except Exception:
+                    refresh_summary['failed'] += 1
+
         snapshots = self.get_latest_data(codes, include_realtime=False)
         matched = []
 
@@ -904,7 +952,7 @@ class StockDataPool:
         matched_count = len(matched)
         has_more = (offset + limit) < matched_count
         
-        return {
+        result = {
             'success': True,
             'board': board,
             'matched_count': matched_count,
@@ -921,6 +969,9 @@ class StockDataPool:
             },
             'results': page,
         }
+        if refresh_summary is not None:
+            result['refresh'] = refresh_summary
+        return result
 
     def screen_main_board(self, criteria=None):
         criteria = dict(criteria or {})
@@ -1206,6 +1257,28 @@ class StockDataPool:
                 'code': code,
                 'requested_date': date,
                 'current_date': current_date,
+                'do_not_analyze_other_date': True,
+                'next_actions': ['update_minute_data'],
+                'resolution': {
+                    'action_required': 'call_tools',
+                    'wait_seconds': 0,
+                    'required_calls': [{
+                        'tool': 'update_minute_data',
+                        'arguments': {
+                            'code': code,
+                            'klt': 5,
+                            'start_time': f'{date} 09:30',
+                            'end_time': f'{date} 15:00',
+                        },
+                    }],
+                    'retry_call': {
+                        'tool': 'analyze_intraday',
+                        'arguments': {
+                            'code': code,
+                            'date': date,
+                        },
+                    },
+                },
             }
         
         if not daily_data:

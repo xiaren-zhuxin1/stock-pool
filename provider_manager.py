@@ -269,6 +269,13 @@ class ProviderManager:
             start_date=start_date, end_date=end_date,
         )
 
+    def get_daily_kline(self, code: str, days: int = 250,
+                        start_date: Optional[str] = None,
+                        end_date: Optional[str] = None,
+                        providers: Optional[List[str]] = None) -> ProviderResult:
+        """兼容旧调用名；新代码优先使用 fetch_daily_kline。"""
+        return self.fetch_daily_kline(code, days, start_date, end_date, providers)
+
     def fetch_minute_kline(self, code: str, klt: int = 5, days: int = 5,
                            providers: Optional[List[str]] = None) -> ProviderResult:
         return self._execute_with_fallback(

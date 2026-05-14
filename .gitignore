@@ -24,3 +24,4 @@ secure_config_example.py
 *.log
 *.tmp
 *.bak
+token
