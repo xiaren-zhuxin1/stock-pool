@@ -134,7 +134,14 @@ class StockDataPool:
 
     @staticmethod
     def get_current_time_info(now: Optional[datetime] = None) -> Dict[str, Any]:
-        """返回 Agent 分析前必须使用的北京时间与 A 股交易时段状态。"""
+        """返回 Agent 分析前必须使用的北京时间与 A 股交易时段状态。
+        
+        TODO: 当前交易日判断仅基于工作日（周一至周五），未考虑 A 股节假日和调休。
+        未来可考虑：
+        1. 集成交易日历数据源（如东方财富交易日历 API）
+        2. 使用本地交易日历文件（需定期更新）
+        3. 调用专业金融数据服务商的交易日历接口
+        """
         if now is None:
             now = datetime.now(SHANGHAI_TZ)
         elif now.tzinfo is None:
