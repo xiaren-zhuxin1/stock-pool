@@ -22,7 +22,7 @@ def print(*args, **kwargs):
 try:
     from .provider_manager import ProviderManager
     from .indicators import calculate_ma, calculate_technical_indicators, ema, rsi
-    from .sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
+    from .sync_jobs import json_dumps, json_loads
     from .storage import (
         init_database_schema,
         save_stock_info as storage_save_stock_info,
@@ -43,14 +43,12 @@ try:
         get_minute_data as minute_get_minute_data,
         minute_fetch_days_for_range,
         minute_kline_range,
-        seconds_until_intraday_data,
-        intraday_resolution,
     )
     from .errors import logger, ValidationError, ProviderError
 except ImportError:
     from provider_manager import ProviderManager
     from indicators import calculate_ma, calculate_technical_indicators, ema, rsi
-    from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
+    from sync_jobs import json_dumps, json_loads
     from storage import (
         init_database_schema,
         save_stock_info as storage_save_stock_info,
@@ -71,12 +69,10 @@ except ImportError:
         get_minute_data as minute_get_minute_data,
         minute_fetch_days_for_range,
         minute_kline_range,
-        seconds_until_intraday_data,
-        intraday_resolution,
     )
     from errors import logger, ValidationError, ProviderError
     from indicators import calculate_ma, calculate_technical_indicators, ema, rsi
-    from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
+    from sync_jobs import json_dumps, json_loads
     from storage import (
         init_database_schema,
         save_stock_info as storage_save_stock_info,
@@ -97,8 +93,6 @@ except ImportError:
         get_minute_data as minute_get_minute_data,
         minute_fetch_days_for_range,
         minute_kline_range,
-        seconds_until_intraday_data,
-        intraday_resolution,
     )
 
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock_pool.db')
@@ -117,7 +111,6 @@ class StockDataPool:
             self.db_path = db_path or DB_PATH
         self.api = ProviderManager()
         self._init_db()
-        self.sync_jobs = SyncJobStore(self._connect, self._normalize_positive_int, self.get_current_time_info)
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path, uri=self._sqlite_uri)
@@ -219,25 +212,6 @@ class StockDataPool:
         return json_loads(value, default)
 
     @staticmethod
-    def _sync_job_from_row(row):
-        return sync_job_from_row(row)
-
-    def save_sync_job(self, job):
-        self.sync_jobs.save(job)
-
-    def update_sync_job(self, job_id, **fields):
-        self.sync_jobs.update(job_id, **fields)
-
-    def get_sync_job(self, job_id):
-        return self.sync_jobs.get(job_id)
-
-    def list_sync_jobs(self, limit=20, offset=0):
-        return self.sync_jobs.list(limit, offset)
-
-    def mark_running_sync_jobs_interrupted(self, timestamp=None):
-        self.sync_jobs.mark_running_interrupted(timestamp)
-
-    @staticmethod
     def _normalize_limit(limit):
         if limit is None:
             return None
@@ -262,31 +236,31 @@ class StockDataPool:
         return offset
     
     def fetch_kline_data(self, code: str, days: int = 250) -> Optional[List[str]]:
-        klines, api_name = self.api.fetch_kline(code, days)
-        if klines:
-            print(f"  [API: {api_name}] 获取K线成功")
-            return klines
+        result = self.api.fetch_daily_kline(code, days)
+        if result.success and result.data:
+            print(f"  [API: {result.provider_name}] 获取K线成功")
+            return result.data
         return None
     
     def fetch_stock_info(self, code: str) -> Optional[Dict[str, str]]:
-        realtime, api_name = self.api.fetch_realtime(code)
-        if realtime:
+        result = self.api.fetch_realtime(code)
+        if result.success and result.data:
             return {
-                'name': realtime.get('name', ''),
+                'name': result.data.get('name', ''),
                 'market': 'SH' if code.startswith('6') else 'SZ',
             }
         return None
     
     def fetch_valuation_data(self, code: str) -> Optional[Dict[str, Any]]:
-        realtime, api_name = self.api.fetch_realtime(code)
-        if realtime:
-            return realtime
+        result = self.api.fetch_realtime(code)
+        if result.success and result.data:
+            return result.data
         return None
     
     def get_realtime_price(self, code: str) -> Dict[str, Any]:
         """直接从外部行情 API 获取实时价格，不读取或写入服务缓存。"""
-        realtime, api_name = self.api.fetch_realtime(code)
-        if not realtime:
+        result = self.api.fetch_realtime(code)
+        if not result.success or not result.data:
             return {
                 'success': False,
                 'code': code,
@@ -294,11 +268,11 @@ class StockDataPool:
                 'message': '实时行情 API 未返回数据'
             }
         
-        realtime = dict(realtime)
+        realtime = dict(result.data)
         realtime.update({
             'success': True,
             'code': code,
-            'api_name': api_name,
+            'api_name': result.provider_name,
             'cache_used': False,
             'fetched_at': self.get_current_time_info()['datetime'],
         })
@@ -314,8 +288,10 @@ class StockDataPool:
         return results
     
     def fetch_fund_flow(self, code, days=100):
-        fund_flow_items, api_name = self.api.fetch_fund_flow_history(code, days)
-        return fund_flow_items
+        result = self.api.fetch_fund_flow(code, days)
+        if result.success and result.data:
+            return result.data
+        return None
     
     def save_fund_flow_data(self, code, fund_flow_items):
         if not fund_flow_items:
@@ -778,14 +754,19 @@ class StockDataPool:
         if delay is None:
             delay = 0.2
 
-        universe = self.api.fetch_stock_universe(board=board, limit=max_codes, page_size=100)
-        codes = universe.get('codes', [])
+        universe_result = self.api.fetch_stock_list(board=board)
+        if universe_result.success and universe_result.data:
+            codes = [s['code'] for s in universe_result.data]
+            universe_total = len(codes)
+        else:
+            codes = []
+            universe_total = 0
         today = self.get_current_time_info()['date']
         summary = {
             'success': True,
             'board': board,
             'refresh': refresh,
-            'universe_total': universe.get('total'),
+            'universe_total': universe_total,
             'total': len(codes),
             'scanned': 0,
             'refreshed': 0,
@@ -842,21 +823,7 @@ class StockDataPool:
         board = criteria.get('board') or criteria.get('market') or 'a_share'
         limit = self._normalize_positive_int(criteria.get('limit'), 50, 200)
         offset = self._normalize_positive_int(criteria.get('offset'), 0, 100000)
-        universe_limit = criteria.get('universe_limit')
-        if universe_limit is not None:
-            universe_limit = self._normalize_positive_int(universe_limit, 0, 5000)
-        batch_size = self._normalize_positive_int(criteria.get('batch_size'), 200, 500) or 200
         include_realtime = bool(criteria.get('include_realtime', False))
-        realtime_limit = self._normalize_positive_int(criteria.get('realtime_limit'), 20, 50)
-        refresh = criteria.get('refresh', 'none')
-        if refresh not in ('none', 'missing', 'stale', 'force'):
-            refresh = 'none'
-        default_max_refresh = 200 if refresh != 'none' else 0
-        max_refresh = self._normalize_positive_int(criteria.get('max_refresh'), default_max_refresh, 200)
-        days = self._normalize_positive_int(criteria.get('days'), 250, 500) or 250
-        delay = self._to_number(criteria.get('delay'))
-        if delay is None:
-            delay = 0.2
 
         filters = {
             'position_min': self._to_number(criteria.get('position_min')),
@@ -878,35 +845,14 @@ class StockDataPool:
                 'error': '市场筛选必须提供至少一个筛选条件，例如 position_max、pe_ttm_max、pb_max 或 market_cap_min。',
             }
 
-        universe = self.api.fetch_stock_universe(board=board, limit=universe_limit, page_size=100)
-        codes = universe.get('codes', [])
+        universe_result = self.api.fetch_stock_list(board=board)
+        if universe_result.success and universe_result.data:
+            codes = [s['code'] for s in universe_result.data]
+        else:
+            codes = []
 
-        refreshed = {'attempted': 0, 'success': 0, 'failed': 0, 'mode': refresh}
-        if refresh != 'none' and max_refresh > 0:
-            today = self.get_current_time_info()['date']
-            for code in codes:
-                if refreshed['attempted'] >= max_refresh:
-                    break
-                freshness = self.check_data_freshness(code, 'daily')
-                if not self._needs_daily_refresh(freshness, refresh, today):
-                    continue
-                refreshed['attempted'] += 1
-                try:
-                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
-                    refreshed['success'] += 1
-                except (ValidationError, ProviderError) as e:
-                    logger.warning(f"筛选刷新失败 {code}: {e.message}", code=code, error_code=e.error_code)
-                    refreshed['failed'] += 1
-                except (ConnectionError, TimeoutError) as e:
-                    logger.warning(f"网络错误 {code}: {e}", code=code)
-                    refreshed['failed'] += 1
-                except Exception as e:
-                    logger.error(f"筛选刷新未预期的错误 {code}: {e}", exc_info=True, code=code)
-                    refreshed['failed'] += 1
-
-        snapshots = self.get_latest_data(codes, include_realtime=False, batch_size=batch_size)
+        snapshots = self.get_latest_data(codes, include_realtime=False)
         matched = []
-        skipped_no_snapshot = max(0, len(codes) - len(snapshots))
 
         for row in snapshots:
             if not self._passes_range(row.get('position_pct'), filters['position_min'], filters['position_max']):
@@ -935,8 +881,6 @@ class StockDataPool:
             realtime_rows = self.get_latest_data(
                 [item['code'] for item in page],
                 include_realtime=True,
-                realtime_limit=realtime_limit,
-                batch_size=batch_size
             )
             by_code = {item['code']: item for item in realtime_rows}
             page = [by_code.get(item['code'], item) for item in page]
@@ -947,10 +891,6 @@ class StockDataPool:
         return {
             'success': True,
             'board': board,
-            'criteria': {k: v for k, v in criteria.items() if v is not None},
-            'universe_total': universe.get('total'),
-            'universe_returned': len(codes),
-            'snapshot_count': len(snapshots),
             'matched_count': matched_count,
             'returned': len(page),
             'offset': offset,
@@ -963,12 +903,7 @@ class StockDataPool:
                 'has_more': has_more,
                 'next_offset': offset + limit if has_more else None,
             },
-            'refresh': refreshed,
-            'skipped': {
-                'no_cached_snapshot': skipped_no_snapshot,
-            },
             'results': page,
-            'time_context': self.get_current_time_info(),
         }
 
     def screen_main_board(self, criteria=None):
@@ -1011,24 +946,6 @@ class StockDataPool:
         
         return result
     
-    def check_missing_data(self, codes, start_date, end_date):
-        conn = self._connect()
-        cursor = conn.cursor()
-        
-        missing = {}
-        for code in codes:
-            cursor.execute('''
-                SELECT COUNT(*) FROM stock_daily 
-                WHERE code = ? AND data_date BETWEEN ? AND ?
-            ''', (code, start_date, end_date))
-            
-            count = cursor.fetchone()[0]
-            if count == 0:
-                missing[code] = 'no_data'
-        
-        conn.close()
-        return missing
-    
     def get_db_stats(self):
         conn = self._connect()
         cursor = conn.cursor()
@@ -1063,10 +980,10 @@ class StockDataPool:
         }
     
     def fetch_minute_data(self, code, klt=5, days=5):
-        klines, api_name = self.api.fetch_minute_kline(code, klt, days)
-        if klines:
-            print(f"  [API: {api_name}] 获取{klt}分钟K线成功")
-            return klines
+        result = self.api.fetch_minute_kline(code, klt, days)
+        if result.success and result.data:
+            print(f"  [API: {result.provider_name}] 获取{klt}分钟K线成功")
+            return result.data
         return None
 
     @staticmethod
@@ -1183,76 +1100,109 @@ class StockDataPool:
             'resolution': resolution,
         }
     
-    def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0):
+    def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0, auto_refresh=True):
         conn = self._connect()
         try:
-            return minute_get_minute_data(
+            data = minute_get_minute_data(
                 conn, code, klt, start_time, end_time, limit, offset,
                 self._normalize_limit, self._normalize_offset
             )
         finally:
             conn.close()
-    
-    @staticmethod
-    def _seconds_until_intraday_data(time_context):
-        return seconds_until_intraday_data(time_context)
 
-    def _intraday_resolution(self, code, date, time_context, required_calls, reason):
-        return intraday_resolution(code, date, time_context, required_calls, reason, seconds_until_intraday_data)
+        if auto_refresh and not data:
+            time_context = self.get_current_time_info()
+            is_trading_time = time_context.get('is_trading_time', False)
+            is_trading_day = time_context.get('is_trading_day', False)
+
+            if is_trading_day and is_trading_time:
+                try:
+                    days = self._minute_fetch_days_for_range(start_time, end_time, 2)
+                    self.update_minute_data(code, klt=klt, days=days, delay=0, force=True, start_time=start_time, end_time=end_time)
+                    conn = self._connect()
+                    try:
+                        data = minute_get_minute_data(
+                            conn, code, klt, start_time, end_time, limit, offset,
+                            self._normalize_limit, self._normalize_offset
+                        )
+                    finally:
+                        conn.close()
+                except Exception:
+                    pass
+
+        return data
 
     def analyze_intraday(self, code, date=None):
         time_context = self.get_current_time_info()
         if not date:
             date = time_context['date']
         
+        is_trading_time = time_context.get('is_trading_time', False)
+        is_trading_day = time_context.get('is_trading_day', False)
+        current_date = time_context['date']
+        requested_is_today = (date == current_date)
+        
         data_5min = self.get_minute_data(code, klt=5, start_time=f'{date} 09:30', end_time=f'{date} 15:00')
         daily_data = self.get_daily_data(code, limit=2)
         technical_data = self.get_technical_data(code, start_date=date)
         
         if not data_5min:
-            minute_freshness = self.check_data_freshness(code, 'minute', klt=5)
-            daily_freshness = self.check_data_freshness(code, 'daily')
-            return {
-                'success': False,
-                'status': 'missing_minute_data',
-                'code': code,
-                'requested_date': date,
-                'current_date': time_context['date'],
-                'message': f'未获取到 {date} 的5分钟分时数据',
-                'latest_minute_time': minute_freshness.get('latest_time'),
-                'latest_daily_date': daily_freshness.get('latest_date'),
-                'next_actions': ['update_minute_data', 'update_stock'],
-                'resolution': self._intraday_resolution(code, date, time_context, [
-                    {
-                        'tool': 'update_minute_data',
-                        'arguments': {
-                            'code': code,
-                            'klt': 5,
-                            'days': 2,
-                            'force': True,
-                            'start_time': f'{date} 09:30',
-                            'end_time': f'{date} 15:00',
-                        },
+            if requested_is_today and not is_trading_day:
+                return {
+                    'success': False,
+                    'error': {
+                        'code': 'NON_TRADING_DAY',
+                        'message': f'{date} 不是交易日，无法获取分时数据',
+                        'severity': 'info',
+                        'recoverable': False,
                     },
-                    {'tool': 'update_stock', 'arguments': {'code': code, 'days': 10, 'force': True}},
-                ], '本地缺少请求日期的5分钟分时数据'),
-                'do_not_analyze_other_date': True,
-            }
-        if not daily_data:
-            daily_freshness = self.check_data_freshness(code, 'daily')
+                    'code': code,
+                    'requested_date': date,
+                    'is_trading_day': is_trading_day,
+                }
+            
+            if requested_is_today and not is_trading_time:
+                trading_session = time_context.get('trading_session', 'unknown')
+                return {
+                    'success': False,
+                    'error': {
+                        'code': 'OUTSIDE_TRADING_HOURS',
+                        'message': f'当前非交易时间（{trading_session}），分钟数据可能不完整。请在交易时间重试。',
+                        'severity': 'warning',
+                        'recoverable': True,
+                        'suggested_action': '请在交易时间（9:30-11:30, 13:00-15:00）重试',
+                    },
+                    'code': code,
+                    'requested_date': date,
+                    'is_trading_time': is_trading_time,
+                    'trading_session': trading_session,
+                }
+            
             return {
                 'success': False,
-                'status': 'missing_daily_data',
+                'error': {
+                    'code': 'DATA_NOT_FOUND',
+                    'message': f'缺少分钟数据，无法进行日内分析。未获取到 {date} 的5分钟分时数据',
+                    'severity': 'error',
+                    'recoverable': True,
+                    'suggested_action': '请在交易时间重试，系统会自动获取分钟数据',
+                },
                 'code': code,
                 'requested_date': date,
-                'current_date': time_context['date'],
-                'message': f'未获取到 {date} 可用的日K数据',
-                'latest_daily_date': daily_freshness.get('latest_date'),
-                'next_actions': ['update_stock'],
-                'resolution': self._intraday_resolution(code, date, time_context, [
-                    {'tool': 'update_stock', 'arguments': {'code': code, 'days': 10, 'force': True}},
-                ], '本地缺少请求日期可用的日K数据'),
-                'do_not_analyze_other_date': True,
+                'current_date': current_date,
+            }
+        
+        if not daily_data:
+            return {
+                'success': False,
+                'error': {
+                    'code': 'DAILY_DATA_MISSING',
+                    'message': f'缺少日K数据，无法进行日内分析',
+                    'severity': 'error',
+                    'recoverable': True,
+                },
+                'code': code,
+                'requested_date': date,
             }
         
         data_5min.reverse()
@@ -1263,26 +1213,14 @@ class StockDataPool:
         if not morning_data:
             return {
                 'success': False,
-                'status': 'missing_morning_data',
+                'error': {
+                    'code': 'MORNING_DATA_MISSING',
+                    'message': f'未获取到 {date} 的上午分时数据，可能非交易日或数据不完整',
+                    'severity': 'warning',
+                    'recoverable': True,
+                },
                 'code': code,
                 'requested_date': date,
-                'current_date': time_context['date'],
-                'message': f'未获取到 {date} 的上午分时数据',
-                'next_actions': ['update_minute_data'],
-                'resolution': self._intraday_resolution(code, date, time_context, [
-                    {
-                        'tool': 'update_minute_data',
-                        'arguments': {
-                            'code': code,
-                            'klt': 5,
-                            'days': 2,
-                            'force': True,
-                            'start_time': f'{date} 09:30',
-                            'end_time': f'{date} 15:00',
-                        },
-                    },
-                ], '本地缺少请求日期的上午分时数据'),
-                'do_not_analyze_other_date': True,
             }
         
         open_price = morning_data[0]['open']

@@ -153,20 +153,6 @@ def init_database_schema(conn: sqlite3.Connection) -> None:
             UNIQUE(code, data_time, klt)
         )
     ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS service_sync_jobs (
-            job_id TEXT PRIMARY KEY,
-            status TEXT NOT NULL,
-            args_json TEXT,
-            progress_json TEXT,
-            result_json TEXT,
-            error TEXT,
-            created_at TEXT,
-            updated_at TEXT,
-            finished_at TEXT
-        )
-    ''')
     
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_code_date ON stock_daily(code, data_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_date ON stock_daily(data_date)')
@@ -175,7 +161,6 @@ def init_database_schema(conn: sqlite3.Connection) -> None:
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_technical_code_date ON stock_technical(code, data_date)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_code_time ON stock_minute(code, data_time)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_minute_time ON stock_minute(data_time)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_sync_jobs_updated ON service_sync_jobs(updated_at)')
     
     ensure_column(cursor, 'stock_technical', 'atr', 'REAL')
     ensure_column(cursor, 'stock_technical', 'obv', 'REAL')

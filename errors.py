@@ -90,7 +90,7 @@ class DataNotFoundError(StockPoolError):
             severity=ErrorSeverity.WARNING,
             details=details,
             recoverable=True,
-            suggested_action="请先调用 update_stock 更新数据",
+            suggested_action="请重试，系统会自动获取数据",
         )
 
 

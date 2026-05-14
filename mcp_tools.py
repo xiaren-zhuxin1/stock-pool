@@ -160,44 +160,24 @@ TOOLS = [
     },
     {
         "name": "screen_market",
-        "description": "按52周位置、估值、市值筛选股票。需至少一个筛选条件。默认返回50条，最多200条，超过200条用offset分页。数据自动刷新。",
+        "description": "按估值、市值、52周位置筛选全市场股票。PE/PB/市值从东方财富API实时获取，52周位置从本地数据库获取。覆盖5000+只股票，需至少一个筛选条件。默认返回50条，最多200条；结果超过200条时用offset分页获取下一批。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
-                "position_min": {"type": "number", "description": "52周位置下限"},
-                "position_max": {"type": "number", "description": "52周位置上限"},
-                "pe_ttm_min": {"type": "number", "description": "市盈率TTM下限"},
-                "pe_ttm_max": {"type": "number", "description": "市盈率TTM上限"},
+                "position_min": {"type": "number", "description": "52周位置下限(%)，依赖本地数据库"},
+                "position_max": {"type": "number", "description": "52周位置上限(%)，依赖本地数据库"},
+                "pe_ttm_min": {"type": "number", "description": "市盈率TTM下限(正值，负PE即亏损自动排除)"},
+                "pe_ttm_max": {"type": "number", "description": "市盈率TTM上限(正值，负PE即亏损自动排除)"},
                 "pb_min": {"type": "number", "description": "市净率下限"},
                 "pb_max": {"type": "number", "description": "市净率上限"},
                 "market_cap_min": {"type": "number", "description": "总市值下限(亿)"},
                 "market_cap_max": {"type": "number", "description": "总市值上限(亿)"},
-                "sort_by": {"type": "string", "description": "排序字段: position_pct/pe_ttm/pb/market_cap/close/code/date", "default": "position_pct"},
+                "sort_by": {"type": "string", "description": "排序字段: pe_ttm/position_pct/pb/market_cap/close/code/name", "default": "pe_ttm"},
                 "sort_order": {"type": "string", "description": "排序方向: asc/desc", "default": "asc"},
                 "limit": {"type": "integer", "description": "返回数量，默认50，最大200", "default": 50},
                 "offset": {"type": "integer", "description": "分页偏移量", "default": 0},
                 "include_realtime": {"type": "boolean", "description": "补实时行情", "default": False}
-            }
-        }
-    },
-    {
-        "name": "screen_all_market",
-        "description": "筛选所有符合条件的股票，无数量限制。后台执行，返回job_id后用get_sync_status查进度。工作流程：1. 调用screen_all_market设置筛选条件，获得job_id；2. 用get_sync_status(job_id)查询进度，等待status='completed'；3. 从result字段获取完整筛选结果。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "board": {"type": "string", "description": "板块", "default": "a_share"},
-                "position_min": {"type": "number", "description": "52周位置下限"},
-                "position_max": {"type": "number", "description": "52周位置上限"},
-                "pe_ttm_min": {"type": "number", "description": "市盈率TTM下限"},
-                "pe_ttm_max": {"type": "number", "description": "市盈率TTM上限"},
-                "pb_min": {"type": "number", "description": "市净率下限"},
-                "pb_max": {"type": "number", "description": "市净率上限"},
-                "market_cap_min": {"type": "number", "description": "总市值下限(亿)"},
-                "market_cap_max": {"type": "number", "description": "总市值上限(亿)"},
-                "sort_by": {"type": "string", "description": "排序字段", "default": "position_pct"},
-                "sort_order": {"type": "string", "description": "排序方向", "default": "asc"}
             }
         }
     },
@@ -284,7 +264,7 @@ TOOLS = [
     # ==================== 日内分析工具 ====================
     {
         "name": "analyze_intraday",
-        "description": "分析单只股票日内走势。先调用 get_current_time 确认交易时段。失败时按 resolution 调用工具或等待，不要改用其他日期。",
+        "description": "分析单只股票日内走势。先调用 get_current_time 确认交易时段。非交易时间会返回明确错误提示。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -295,17 +275,4 @@ TOOLS = [
         }
     },
 
-    # ==================== 后台任务工具 ====================
-    {
-        "name": "get_sync_status",
-        "description": "查询后台任务状态。传 job_id 查单个任务，不传则列出最近任务。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "job_id": {"type": "string", "description": "任务ID"},
-                "limit": {"type": "integer", "description": "返回数，默认20", "default": 20},
-                "offset": {"type": "integer", "description": "分页偏移", "default": 0}
-            }
-        }
-    },
 ]

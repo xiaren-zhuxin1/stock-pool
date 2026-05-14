@@ -6,6 +6,7 @@ import time
 import builtins
 import sqlite3
 import threading
+import requests
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any, Callable
 from contextlib import contextmanager
@@ -26,7 +27,7 @@ from provider_manager import ProviderManager
 from mcp_tools import TOOLS
 from errors import (
     create_success_response, create_error_response, handle_error,
-    ValidationError, DataNotFoundError, Logger,
+    ValidationError, DataNotFoundError, ProviderError, Logger,
 )
 from storage import (
     init_database_schema,
@@ -48,11 +49,9 @@ from minute_data import (
     get_minute_data as minute_get_minute_data,
     minute_fetch_days_for_range,
     minute_kline_range,
-    seconds_until_intraday_data,
-    intraday_resolution,
 )
 from indicators import calculate_ma, calculate_technical_indicators, ema, rsi, calculate_returns, calculate_volume_analysis, generate_technical_signals, calculate_support_resistance
-from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
+from sync_jobs import json_dumps, json_loads
 
 
 def _log(*args, **kwargs):
@@ -198,7 +197,8 @@ class StockPoolServer:
 
         self._init_db()
         self.provider_manager = ProviderManager(self.config.get('providers', {}))
-        self.sync_jobs = SyncJobStore(self._connect, self._normalize_positive_int, self.get_current_time_info)
+        self._screener_cache = {}
+        self._screener_cache_time = {}
         logger.info("StockPoolServer 初始化完成")
 
     def _connect(self) -> sqlite3.Connection:
@@ -414,20 +414,6 @@ class StockPoolServer:
             return 0
 
         return min(requested_days, max(5, gap_days * 2 + 5))
-
-    @staticmethod
-    def _needs_daily_refresh(freshness, refresh, today):
-        if refresh == 'force':
-            return True
-        if refresh == 'missing' and not freshness.get('has_data'):
-            return True
-        if refresh == 'stale':
-            if not freshness.get('has_data'):
-                return True
-            if freshness.get('should_refresh') is not None:
-                return freshness.get('should_refresh')
-            return freshness.get('latest_date') != today
-        return False
 
     def _fetch_and_save_realtime(self, code: str) -> Dict[str, Any]:
         result = self.provider_manager.fetch_realtime(code)
@@ -711,10 +697,27 @@ class StockPoolServer:
 
         return data
 
-    def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0):
+    def get_minute_data(self, code, klt=5, start_time=None, end_time=None, limit=None, offset=0, auto_refresh=True):
         with self._get_connection() as conn:
-            return minute_get_minute_data(conn, code, klt, start_time, end_time, limit, offset,
+            data = minute_get_minute_data(conn, code, klt, start_time, end_time, limit, offset,
                                           self._normalize_limit, self._normalize_offset)
+
+        if auto_refresh and not data:
+            time_context = self.get_current_time_info()
+            is_trading_time = time_context.get('is_trading_time', False)
+            is_trading_day = time_context.get('is_trading_day', False)
+
+            if is_trading_day and is_trading_time:
+                try:
+                    days = minute_fetch_days_for_range(start_time, end_time, 2)
+                    self._fetch_and_save_minute_data(code, klt=klt, days=days, force=True, start_time=start_time, end_time=end_time)
+                    with self._get_connection() as conn:
+                        data = minute_get_minute_data(conn, code, klt, start_time, end_time, limit, offset,
+                                                      self._normalize_limit, self._normalize_offset)
+                except Exception:
+                    pass
+
+        return data
 
     def get_latest_data(self, codes, include_realtime=True, realtime_limit=None, batch_size=200):
         codes = self._unique_codes(codes)
@@ -872,39 +875,72 @@ class StockPoolServer:
         if not date:
             date = time_context['date']
 
+        is_trading_time = time_context.get('is_trading_time', False)
+        is_trading_day = time_context.get('is_trading_day', False)
+        current_date = time_context['date']
+        requested_is_today = (date == current_date)
+
         data_5min = self.get_minute_data(code, klt=5, start_time=f'{date} 09:30', end_time=f'{date} 15:00')
         daily_data = self.get_daily_data(code, limit=2)
         technical_data = self.get_technical_data(code, start_date=date)
 
         if not data_5min:
-            minute_freshness = self.check_data_freshness(code, 'minute', klt=5)
-            daily_freshness = self.check_data_freshness(code, 'daily')
+            if requested_is_today and not is_trading_day:
+                return {
+                    'success': False,
+                    'error': {
+                        'code': 'NON_TRADING_DAY',
+                        'message': f'{date} 不是交易日，无法获取分时数据',
+                        'severity': 'info',
+                        'recoverable': False,
+                    },
+                    'code': code,
+                    'requested_date': date,
+                    'is_trading_day': is_trading_day,
+                }
+
+            if requested_is_today and not is_trading_time:
+                trading_session = time_context.get('trading_session', 'unknown')
+                return {
+                    'success': False,
+                    'error': {
+                        'code': 'OUTSIDE_TRADING_HOURS',
+                        'message': f'当前非交易时间（{trading_session}），分钟数据可能不完整。请在交易时间重试。',
+                        'severity': 'warning',
+                        'recoverable': True,
+                        'suggested_action': '请在交易时间（9:30-11:30, 13:00-15:00）重试',
+                    },
+                    'code': code,
+                    'requested_date': date,
+                    'is_trading_time': is_trading_time,
+                    'trading_session': trading_session,
+                }
+
             return {
-                'success': False, 'status': 'missing_minute_data',
-                'code': code, 'requested_date': date, 'current_date': time_context['date'],
-                'message': f'未获取到 {date} 的5分钟分时数据',
-                'latest_minute_time': minute_freshness.get('latest_time'),
-                'latest_daily_date': daily_freshness.get('latest_date'),
-                'next_actions': ['update_minute_data', 'update_stock'],
-                'resolution': intraday_resolution(code, date, time_context, [
-                    {'tool': 'update_minute_data', 'arguments': {'code': code, 'klt': 5, 'days': 2, 'force': True, 'start_time': f'{date} 09:30', 'end_time': f'{date} 15:00'}},
-                    {'tool': 'update_stock', 'arguments': {'code': code, 'days': 10, 'force': True}},
-                ], '本地缺少请求日期的5分钟分时数据', seconds_until_intraday_data),
-                'do_not_analyze_other_date': True,
+                'success': False,
+                'error': {
+                    'code': 'DATA_NOT_FOUND',
+                    'message': f'缺少分钟数据，无法进行日内分析。未获取到 {date} 的5分钟分时数据',
+                    'severity': 'error',
+                    'recoverable': True,
+                    'suggested_action': '请在交易时间重试，系统会自动获取分钟数据',
+                },
+                'code': code,
+                'requested_date': date,
+                'current_date': current_date,
             }
 
         if not daily_data:
-            daily_freshness = self.check_data_freshness(code, 'daily')
             return {
-                'success': False, 'status': 'missing_daily_data',
-                'code': code, 'requested_date': date, 'current_date': time_context['date'],
-                'message': f'未获取到 {date} 可用的日K数据',
-                'latest_daily_date': daily_freshness.get('latest_date'),
-                'next_actions': ['update_stock'],
-                'resolution': intraday_resolution(code, date, time_context, [
-                    {'tool': 'update_stock', 'arguments': {'code': code, 'days': 10, 'force': True}},
-                ], '本地缺少请求日期可用的日K数据', seconds_until_intraday_data),
-                'do_not_analyze_other_date': True,
+                'success': False,
+                'error': {
+                    'code': 'DAILY_DATA_MISSING',
+                    'message': f'缺少日K数据，无法进行日内分析',
+                    'severity': 'error',
+                    'recoverable': True,
+                },
+                'code': code,
+                'requested_date': date,
             }
 
         data_5min.reverse()
@@ -913,14 +949,15 @@ class StockPoolServer:
 
         if not morning_data:
             return {
-                'success': False, 'status': 'missing_morning_data',
-                'code': code, 'requested_date': date, 'current_date': time_context['date'],
-                'message': f'未获取到 {date} 的上午分时数据',
-                'next_actions': ['update_minute_data'],
-                'resolution': intraday_resolution(code, date, time_context, [
-                    {'tool': 'update_minute_data', 'arguments': {'code': code, 'klt': 5, 'days': 2, 'force': True, 'start_time': f'{date} 09:30', 'end_time': f'{date} 15:00'}},
-                ], '本地缺少请求日期的上午分时数据', seconds_until_intraday_data),
-                'do_not_analyze_other_date': True,
+                'success': False,
+                'error': {
+                    'code': 'MORNING_DATA_MISSING',
+                    'message': f'未获取到 {date} 的上午分时数据，可能非交易日或数据不完整',
+                    'severity': 'warning',
+                    'recoverable': True,
+                },
+                'code': code,
+                'requested_date': date,
             }
 
         open_price = morning_data[0]['open']
@@ -1003,26 +1040,118 @@ class StockPoolServer:
         }
 
     @performance_monitor
+    def _fetch_screener_data(self, board: str = 'a_share') -> List[Dict[str, Any]]:
+        cache_key = f"screener_{board}"
+        cache_ttl = 14400
+        cached_time = self._screener_cache_time.get(cache_key, 0)
+        if cache_key in self._screener_cache and (time.time() - cached_time) < cache_ttl:
+            logger.info(f"筛选缓存命中: {board}, {len(self._screener_cache[cache_key])}只")
+            return self._screener_cache[cache_key]
+
+        board_map = {
+            'a_share': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23',
+            'main': 'm:1+t:2,m:0+t:6',
+            'gem': 'm:0+t:80',
+            'star': 'm:1+t:23',
+            'sh_main': 'm:1+t:2',
+            'sz_main': 'm:0+t:6',
+            'bse': 'm:0+t:81,m:1+t:23',
+            'hs_a': 'm:1+t:2,m:0+t:6,m:0+t:80,m:1+t:23',
+        }
+        market = board_map.get(board, board_map['a_share'])
+        url = "https://push2.eastmoney.com/api/qt/clist/get"
+        fields = 'f12,f14,f2,f3,f9,f23,f20,f115'
+        all_stocks = []
+        page = 1
+        while True:
+            params = {
+                'pn': str(page), 'pz': '200', 'po': '1', 'np': '1',
+                'ut': 'bd1d9ddb04089700cf9c27f6f7426281', 'fltt': '2',
+                'invt': '2', 'fid': 'f3', 'fs': market, 'fields': fields,
+            }
+            try:
+                resp = requests.get(url, params=params,
+                                    headers={'Referer': 'https://quote.eastmoney.com/',
+                                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'},
+                                    timeout=15)
+                data = resp.json()
+            except Exception as e:
+                if page == 1:
+                    data = None
+                    for retry in range(3):
+                        try:
+                            time.sleep(2 * (retry + 1))
+                            resp = requests.get(url, params=params,
+                                                headers={'Referer': 'https://quote.eastmoney.com/',
+                                                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'},
+                                                timeout=15)
+                            data = resp.json()
+                            break
+                        except Exception as e2:
+                            logger.warning(f"筛选API请求重试{retry+1}失败 page={page}: {e2}")
+                    if data is None:
+                        break
+                else:
+                    logger.warning(f"筛选API请求失败 page={page}: {e}")
+                    break
+
+            diff = data.get('data', {}).get('diff', [])
+            total = data.get('data', {}).get('total', 0)
+            if not diff:
+                break
+
+            for item in diff:
+                code = str(item.get('f12', ''))
+                if not code or not code[0].isdigit():
+                    continue
+                close_raw = item.get('f2')
+                close = None if close_raw == '-' or close_raw is None else float(close_raw)
+                pe_dynamic_raw = item.get('f9')
+                pe_dynamic = None if pe_dynamic_raw == '-' or pe_dynamic_raw is None else float(pe_dynamic_raw)
+                pe_ttm_raw = item.get('f115')
+                pe_ttm = None if pe_ttm_raw == '-' or pe_ttm_raw is None else float(pe_ttm_raw)
+                pb_raw = item.get('f23')
+                pb = None if pb_raw == '-' or pb_raw is None else float(pb_raw)
+                mcap_raw = item.get('f20')
+                market_cap_yi = None
+                if mcap_raw not in ('-', None) and mcap_raw:
+                    try:
+                        market_cap_yi = round(float(mcap_raw) / 1e8, 2)
+                    except (ValueError, TypeError):
+                        pass
+
+                all_stocks.append({
+                    'code': code,
+                    'name': item.get('f14'),
+                    'market': 'SH' if code.startswith('6') else ('BJ' if code.startswith(('4', '8')) else 'SZ'),
+                    'close': close,
+                    'change_pct': item.get('f3'),
+                    'pe_ttm': pe_ttm,
+                    'pe_dynamic': pe_dynamic,
+                    'pb': pb,
+                    'market_cap': market_cap_yi,
+                })
+
+            if len(all_stocks) >= total:
+                break
+            page += 1
+            if page > 60:
+                break
+            time.sleep(0.3)
+
+        if all_stocks:
+            self._screener_cache[cache_key] = all_stocks
+            self._screener_cache_time[cache_key] = time.time()
+            logger.info(f"筛选数据已缓存: {board}, {len(all_stocks)}只, TTL={cache_ttl}s")
+
+        return all_stocks
+
     def screen_market(self, criteria: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         criteria = dict(criteria or {})
         board = criteria.get('board') or criteria.get('market') or 'a_share'
         limit = self._normalize_positive_int(criteria.get('limit'), 50, 200)
         offset = self._normalize_positive_int(criteria.get('offset'), 0, 100000)
-        universe_limit = criteria.get('universe_limit')
-        if universe_limit is not None:
-            universe_limit = self._normalize_positive_int(universe_limit, 0, 5000)
-        batch_size = self._normalize_positive_int(criteria.get('batch_size'), 200, 500) or 200
         include_realtime = bool(criteria.get('include_realtime', False))
-        realtime_limit = self._normalize_positive_int(criteria.get('realtime_limit'), 20, 50)
-        refresh = criteria.get('refresh', 'none')
-        if refresh not in ('none', 'missing', 'stale', 'force'):
-            refresh = 'none'
-        default_max_refresh = 200 if refresh != 'none' else 0
-        max_refresh = self._normalize_positive_int(criteria.get('max_refresh'), default_max_refresh, 200)
-        days = self._normalize_positive_int(criteria.get('days'), 250, 500) or 250
-        delay = self._to_number(criteria.get('delay'))
-        if delay is None:
-            delay = 0.2
 
         filters = {
             'position_min': self._to_number(criteria.get('position_min')),
@@ -1041,54 +1170,57 @@ class StockPoolServer:
         if not has_filter and not criteria.get('allow_no_filters', False):
             return {'success': False, 'error': '市场筛选必须提供至少一个筛选条件，例如 position_max、pe_ttm_max、pb_max 或 market_cap_min。'}
 
-        stock_list_result = self.provider_manager.fetch_stock_list(board)
-        if not stock_list_result.success:
-            return {'success': False, 'error': f'获取股票列表失败: {stock_list_result.error.message}'}
-        stocks = stock_list_result.data
-        codes = [s['code'] for s in stocks]
+        all_stocks = self._fetch_screener_data(board)
+        if not all_stocks:
+            return {'success': False, 'error': '无法获取市场筛选数据，请稍后重试'}
 
-        refreshed = {'attempted': 0, 'success': 0, 'failed': 0, 'mode': refresh}
-        if refresh != 'none' and max_refresh > 0:
-            today = self.get_current_time_info()['date']
-            for code in codes:
-                if refreshed['attempted'] >= max_refresh:
-                    break
-                freshness = self.check_data_freshness(code, 'daily')
-                if not self._needs_daily_refresh(freshness, refresh, today):
-                    continue
-                refreshed['attempted'] += 1
-                try:
-                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
-                    refreshed['success'] += 1
-                except (ValidationError, ProviderError) as e:
-                    logger.warning(f"筛选刷新失败 {code}: {e.message}", code=code, error_code=e.error_code)
-                    refreshed['failed'] += 1
-                except (ConnectionError, TimeoutError) as e:
-                    logger.warning(f"网络错误 {code}: {e}", code=code)
-                    refreshed['failed'] += 1
-                except Exception as e:
-                    logger.error(f"筛选刷新未预期的错误 {code}: {e}", exc_info=True, code=code)
-                    refreshed['failed'] += 1
+        need_position = filters['position_min'] is not None or filters['position_max'] is not None
+        position_map = {}
+        if need_position:
+            try:
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        'SELECT code, position_pct, high_52w, low_52w FROM stock_technical '
+                        'WHERE position_pct IS NOT NULL'
+                    )
+                    for row in cursor.fetchall():
+                        position_map[row[0]] = {
+                            'position_pct': row[1],
+                            'high_52w': row[2],
+                            'low_52w': row[3],
+                        }
+            except Exception as e:
+                logger.warning(f"获取52周位置数据失败: {e}")
 
-        snapshots = self.get_latest_data(codes, include_realtime=False, batch_size=batch_size)
         matched = []
-        skipped_no_snapshot = max(0, len(codes) - len(snapshots))
-
-        for row in snapshots:
-            if not self._passes_range(row.get('position_pct'), filters['position_min'], filters['position_max']):
-                continue
-            if not self._passes_range(row.get('pe_ttm'), filters['pe_ttm_min'], filters['pe_ttm_max']):
-                continue
+        for row in all_stocks:
+            if need_position:
+                pos_data = position_map.get(row['code'])
+                if pos_data:
+                    row['position_pct'] = pos_data['position_pct']
+                    row['high_52w'] = pos_data['high_52w']
+                    row['low_52w'] = pos_data['low_52w']
+                else:
+                    row['position_pct'] = None
+                if not self._passes_range(row.get('position_pct'), filters['position_min'], filters['position_max']):
+                    continue
+            pe = row.get('pe_ttm')
+            if filters['pe_ttm_min'] is not None or filters['pe_ttm_max'] is not None:
+                if pe is None or pe < 0:
+                    continue
+                if not self._passes_range(pe, filters['pe_ttm_min'], filters['pe_ttm_max']):
+                    continue
             if not self._passes_range(row.get('pb'), filters['pb_min'], filters['pb_max']):
                 continue
             if not self._passes_range(row.get('market_cap'), filters['market_cap_min'], filters['market_cap_max']):
                 continue
             matched.append(row)
 
-        sort_by = criteria.get('sort_by', 'position_pct')
-        allowed_sort = {'position_pct', 'pe_ttm', 'pb', 'market_cap', 'close', 'code', 'date'}
+        sort_by = criteria.get('sort_by', 'pe_ttm')
+        allowed_sort = {'position_pct', 'pe_ttm', 'pb', 'market_cap', 'close', 'code', 'name'}
         if sort_by not in allowed_sort:
-            sort_by = 'position_pct'
+            sort_by = 'pe_ttm'
         reverse = criteria.get('sort_order', 'asc') == 'desc'
 
         non_null = [item for item in matched if item.get(sort_by) is not None]
@@ -1100,7 +1232,7 @@ class StockPoolServer:
         if include_realtime and page:
             realtime_rows = self.get_latest_data(
                 [item['code'] for item in page],
-                include_realtime=True, realtime_limit=realtime_limit, batch_size=batch_size,
+                include_realtime=True,
             )
             by_code = {item['code']: item for item in realtime_rows}
             page = [by_code.get(item['code'], item) for item in page]
@@ -1111,10 +1243,6 @@ class StockPoolServer:
         return {
             'success': True,
             'board': board,
-            'criteria': {k: v for k, v in criteria.items() if v is not None},
-            'universe_total': len(codes),
-            'universe_returned': len(codes),
-            'snapshot_count': len(snapshots),
             'matched_count': matched_count,
             'returned': len(page),
             'offset': offset, 'limit': limit, 'has_more': has_more,
@@ -1123,80 +1251,8 @@ class StockPoolServer:
                 'total_matched': matched_count, 'has_more': has_more,
                 'next_offset': offset + limit if has_more else None,
             },
-            'refresh': refreshed,
-            'skipped': {'no_cached_snapshot': skipped_no_snapshot},
             'results': page,
-            'time_context': self.get_current_time_info(),
         }
-
-    @performance_monitor
-    def sync_market(self, board: str = 'a_share', refresh: str = 'stale', 
-                   max_codes: Optional[int] = None, days: int = 250, delay: float = 0.2,
-                   progress_callback: Optional[Callable[[Dict], None]] = None) -> Dict[str, Any]:
-        if refresh not in ('missing', 'stale', 'force'):
-            refresh = 'stale'
-        if max_codes is not None:
-            max_codes = self._normalize_positive_int(max_codes, 0, 100000)
-        days = self._normalize_positive_int(days, 250, 500) or 250
-        delay = self._to_number(delay)
-        if delay is None:
-            delay = 0.2
-
-        stock_list_result = self.provider_manager.fetch_stock_list(board)
-        if not stock_list_result.success:
-            return {'success': False, 'error': f'获取股票列表失败: {stock_list_result.error.message}'}
-        codes = [s['code'] for s in stock_list_result.data]
-        if max_codes:
-            codes = codes[:max_codes]
-
-        today = self.get_current_time_info()['date']
-        summary = {
-            'success': True, 'board': board, 'refresh': refresh,
-            'total': len(codes), 'scanned': 0, 'refreshed': 0,
-            'skipped_fresh': 0, 'failed': 0, 'stopped': False,
-            'current_code': None, 'failures': [],
-        }
-
-        for code in codes:
-            summary['current_code'] = code
-            summary['scanned'] += 1
-            try:
-                freshness = self.check_data_freshness(code, 'daily')
-                if not self._needs_daily_refresh(freshness, refresh, today):
-                    summary['skipped_fresh'] += 1
-                else:
-                    self.update_stock(code, days=days, delay=delay, force=(refresh == 'force'))
-                    summary['refreshed'] += 1
-            except (ValidationError, ProviderError) as e:
-                summary['failed'] += 1
-                if len(summary['failures']) < 20:
-                    summary['failures'].append({'code': code, 'error': e.message, 'error_code': e.error_code})
-                logger.warning(f"市场同步失败 {code}: {e.message}", code=code, error_code=e.error_code)
-            except (ConnectionError, TimeoutError) as e:
-                summary['failed'] += 1
-                if len(summary['failures']) < 20:
-                    summary['failures'].append({'code': code, 'error': str(e), 'error_type': 'network'})
-                logger.warning(f"网络错误 {code}: {e}", code=code)
-            except Exception as e:
-                summary['failed'] += 1
-                if len(summary['failures']) < 20:
-                    summary['failures'].append({'code': code, 'error': str(e), 'error_type': 'unexpected'})
-                logger.error(f"市场同步未预期的错误 {code}: {e}", exc_info=True, code=code)
-
-        summary['current_code'] = None
-        return summary
-
-    def check_missing_data(self, codes, start_date, end_date):
-        with self._get_connection() as conn:
-            cursor = conn.cursor()
-            missing = {}
-            for code in codes:
-                cursor.execute('SELECT COUNT(*) FROM stock_daily WHERE code = ? AND data_date BETWEEN ? AND ?',
-                             (code, start_date, end_date))
-                count = cursor.fetchone()[0]
-                if count == 0:
-                    missing[code] = 'no_data'
-        return missing
 
     def get_db_stats(self):
         with self._get_connection() as conn:
@@ -1306,7 +1362,14 @@ class StockPoolServer:
         klt = arguments.get('klt', 5)
         days = arguments.get('days', 5)
 
-        data = self.get_minute_data(code, klt, days=days)
+        time_info = self.get_current_time_info()
+        today = time_info['date']
+        from datetime import timedelta as _td
+        start_date = (datetime.strptime(today, '%Y-%m-%d') - _td(days=days)).strftime('%Y-%m-%d')
+        start_time = f'{start_date} 09:30'
+        end_time = f'{today} 15:00'
+
+        data = self.get_minute_data(code, klt, start_time=start_time, end_time=end_time)
         if not data:
             return create_error_response(
                 message=f"未获取到 {code} 的分钟K线数据",
@@ -1574,26 +1637,18 @@ class StockPoolServer:
         if result.get('success'):
             return create_success_response(result)
         else:
-            status = result.get('status', 'ANALYSIS_FAILED')
-            msg = result.get('message', '日内分析失败')
-            if status == 'market_closed':
-                return create_error_response(
-                    message=f"市场已关闭，无法获取日内数据。{msg}",
-                    error_code='MARKET_CLOSED',
-                    recoverable=True,
-                    suggested_action="请在交易时间(9:30-15:00)重试",
-                )
-            if status == 'missing_minute_data':
-                return create_error_response(
-                    message=f"缺少分钟数据，无法进行日内分析。{msg}",
-                    error_code='DATA_NOT_FOUND',
-                    recoverable=True,
-                    suggested_action="请在交易时间重试，系统会自动获取分钟数据",
-                )
+            error = result.get('error', {})
+            error_code = error.get('code', 'ANALYSIS_FAILED')
+            message = error.get('message', '日内分析失败')
+            severity = error.get('severity', 'error')
+            recoverable = error.get('recoverable', True)
+            suggested_action = error.get('suggested_action')
+
             return create_error_response(
-                message=msg,
-                error_code=status,
-                recoverable=True,
+                message=message,
+                error_code=error_code,
+                recoverable=recoverable,
+                suggested_action=suggested_action,
             )
 
     def _handle_analyze_main_force(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -1614,26 +1669,6 @@ class StockPoolServer:
 
     def _handle_screen_market(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self.screen_market(arguments)
-
-    def _handle_screen_all_market(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        criteria = dict(arguments)
-        criteria['limit'] = 999999
-        criteria['offset'] = 0
-        return self.screen_market(criteria)
-
-    def _handle_get_sync_status(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        job_id = arguments.get('job_id')
-        limit = arguments.get('limit', 20)
-        offset = arguments.get('offset', 0)
-        if job_id:
-            job = self.sync_jobs.get(job_id)
-            if job:
-                return create_success_response(job)
-            else:
-                return create_error_response(message=f"未找到任务 {job_id}", error_code="NOT_FOUND", recoverable=False)
-        else:
-            jobs = self.sync_jobs.list(limit, offset)
-            return create_success_response(jobs)
 
     handle_tool_call_handlers = None
 
@@ -1656,8 +1691,6 @@ class StockPoolServer:
             'analyze_intraday': self._handle_analyze_intraday,
             'analyze_main_force': self._handle_analyze_main_force,
             'screen_market': self._handle_screen_market,
-            'screen_all_market': self._handle_screen_all_market,
-            'get_sync_status': self._handle_get_sync_status,
         }
 
         handler = handlers.get(name)
