@@ -4,63 +4,77 @@
 
 ## 功能
 
-- 自动减少重复API调用
-- 覆盖基本信息、日K线、估值、财务、资金流向、技术指标、分钟K线等数据能力
-- 自动检查数据完整性，只拉取缺失数据
-- 实时行情工具直接调用外部API
-- 提供当前时间工具，便于AI Agent确定数据分析截止日期与A股交易时段
-- 当日/最新数据查询会在已有日K基础上自动补充实时行情，降低盘中或收盘后当日数据滞后风险
-- 提供 `screen_market` 进行全A股、创业板、科创板、主板筛选，支持条件过滤、分页和少量实时补价
-- 提供 `start_market_sync` 市场数据更新任务，分批、限速处理全市场数据
-- 提供 `get_stock_universe` 从外部行情接口获取候选股票列表，供小范围候选分析使用
-- 支持52周滚动位置分析、估值分析
-- 支持常用技术指标：MA、EMA、MACD、RSI、KDJ、BOLL、ATR、OBV
-- 提供MCP服务器，支持AI模型直接调用
-- 除 `screen_market` 外，当前 MCP 工具以“给定股票代码/代码列表”为输入，不自动枚举与筛选全市场
-- **多API源降级机制**
-- 查询参数强制校验，降低异常输入风险
-- 项目日志默认输出到 stderr，避免污染 MCP JSON-RPC stdout 通道
+- **多数据源降级**：支持7个数据源，自动降级和冷却恢复
+- **智能缓存**：LRU缓存 + 数据库缓存，减少API调用
+- **自动刷新**：数据过期自动拉取，无需手动更新
+- **专业分析**：技术指标、风险指标、主力资金、支撑压力位
+- **市场筛选**：按估值、市值、52周位置筛选全市场股票
+- **MCP协议**：支持AI模型直接调用
 
-## API降级机制
+## 数据源
 
-### 支持的API源
+| 数据源 | 类型 | 优先级 | 能力 |
+|--------|------|--------|------|
+| 东方财富 | 免费 | 1 | 全能（行情、K线、估值、资金流） |
+| 新浪财经 | 免费 | 2 | 行情、K线 |
+| AkShare | 免费 | 3 | 全能 |
+| 腾讯财经 | 免费 | 4 | 行情、K线 |
+| 网易财经 | 免费 | 5 | 行情、K线 |
+| Baostock | 免费 | 6 | K线 |
+| TuShare Pro | 付费 | 10 | 全能+财务数据 |
 
-| API | 说明 | 优先级 |
-|-----|------|--------|
-| 东方财富 | 数据最全，K线+估值 | 1 |
-| 新浪财经 | 备用，实时行情 | 2 |
-| 腾讯财经 | 实时行情备用 | 3 |
-| 网易财经 | 实时行情备用 | 4 |
+### 降级机制
 
-### 降级逻辑
+1. 按优先级依次尝试数据源
+2. 单个数据源失败后进入5分钟冷却期
+3. 冷却期后自动恢复
+4. 所有数据源失败时返回明确错误
 
-```
-1. 优先使用东方财富API
-2. 日K线当前主要在东方财富和新浪之间降级
-3. 实时行情/估值在东方财富、腾讯、新浪、网易之间降级
-4. 分钟K线当前主要使用东方财富
-5. 每个API连续失败3次后，暂时标记为不可用
-6. 所有API不可用时，重置状态重新尝试
-```
+## MCP工具列表
 
-### 错误处理
+### 系统工具
 
-| 错误类型 | 处理方式 |
-|----------|----------|
-| 超时 | 重试3次，间隔递增 |
-| 连接错误 | 重试3次 |
-| 429限流 | 立即切换API |
-| 数据异常 | 切换API |
+| 工具 | 说明 |
+|------|------|
+| get_current_time | 获取北京时间、交易日、交易时段。**分析前必须调用** |
 
-## Agent 使用边界
+### 行情工具
 
-Agent 只应通过 MCP 工具获取和分析股票数据。全A股、创业板、科创板、主板复盘或筛选必须调用 `screen_market`，并提供至少一个筛选条件，例如 `position_max`、`pe_ttm_max`、`pb_max` 或 `market_cap_min`。`get_stock_universe` 只用于小范围候选列表任务，不应由 Agent 自行循环处理全量候选。
+| 工具 | 说明 | 限制 |
+|------|------|------|
+| get_realtime_quote | 获取单只股票实时行情 | - |
+| get_realtime_quotes | 批量获取实时行情 | 最多20只 |
+| get_daily_kline | 获取日K线数据 | 自动刷新 |
+| get_minute_kline | 获取分钟K线数据 | 支持1/5/15/30/60分钟 |
 
-详细个股分析建议采用“先筛选、后逐只分析”的节奏：先用 `screen_market` 缩小候选，再对候选股票逐只或小批次调用详情工具并完成分析后再进入下一只。不要一次性拉取全量候选的全部详情再统一分析，这会显著增加耗时、触发外部接口限流/风控，并挤占上下文导致关键信息丢失。
+### 分析工具
 
-小批量工具有单次上限：`get_latest_data` 最多 30 只，`get_realtime_prices` 最多 20 只，`update_stocks` 最多 50 只，`analyze_position` 最多 100 只，`check_missing_data` 最多 200 只。超过这些规模时应使用 `screen_market` 缩小候选，或使用 `start_market_sync` 分批处理。
+| 工具 | 说明 |
+|------|------|
+| analyze_stock | **综合分析**：技术信号+风险指标+量价+支撑压力+主力资金+估值 |
+| analyze_position | 分析52周位置，判断高低位 |
+| analyze_main_force | 分析主力资金动向 |
+| analyze_intraday | 日内走势分析（仅交易时间） |
 
-## 使用方式
+### 数据工具
+
+| 工具 | 说明 |
+|------|------|
+| get_valuation | 获取估值数据（PE、PB、市值） |
+| get_fund_flow | 获取资金流向数据 |
+| get_technical_indicators | 获取技术指标（MA、MACD、KDJ、BOLL等） |
+| get_financial_data | 获取财务数据（利润表、资产负债表、现金流量表） |
+| get_latest_data | 批量获取综合数据（行情+估值+位置） |
+| get_stock_detail | 获取股票详情（基本信息+行情+资金流） |
+
+### 筛选工具
+
+| 工具 | 说明 |
+|------|------|
+| screen_market | 按估值、市值、52周位置筛选全市场股票 |
+| get_stock_list | 获取板块股票列表 |
+
+## 使用示例
 
 ### Python API
 
@@ -69,161 +83,105 @@ from stock_pool import StockDataPool
 
 pool = StockDataPool()
 
-# 更新数据
-pool.update_stocks(['601138', '600487'], days=250)
+# 获取实时行情
+quote = pool.get_realtime_price('601138')
 
-# 获取最新数据
-data = pool.get_latest_data(['601138', '600487'])
+# 获取日K线
+kline = pool.get_daily_data('601138', days=250)
 
-# 分析位置
-result = pool.analyze_position(['601138', '600487'])
+# 分析52周位置
+position = pool.analyze_position(['601138', '600487'])
 
-# 查看API状态
-status = pool.get_api_status()
-```
-
-### 市场筛选
-
-```python
+# 市场筛选
 result = pool.screen_market({
     'board': 'a_share',
-    'position_max': 30,
-    'pe_ttm_max': 20,
-    'limit': 50,
-    'include_realtime': False,
-})
-```
-
-`screen_market` 必须提供至少一个筛选条件。默认不进行全量实时请求；需要更新数据时使用 `refresh='missing'` 或 `refresh='stale'`。选择更新策略后默认最多处理 200 只，也可用 `max_refresh` 收紧本次处理数量。
-
-面向全市场的推荐流程：
-
-```python
-# 1. 分批更新市场数据
-sync = pool.sync_market(board='a_share', refresh='stale', days=250, delay=0.2)
-
-# 2. 用户筛选时按条件返回结果
-result = pool.screen_market({
-    'board': 'a_share',
-    'position_max': 30,
-    'pe_ttm_max': 20,
-    'refresh': 'none',
+    'position_max': 30,    # 52周位置上限30%
+    'pe_ttm_max': 20,      # PE上限20倍
     'limit': 50,
 })
 ```
 
-常用 `board`：
+### MCP调用示例
 
-| board | 范围 |
-|------|------|
-| `a_share` | 全A股 |
-| `main` | 沪深主板 |
-| `gem` | 创业板 |
-| `star` | 科创板 |
-| `hs_a` | 沪深A股 |
-| `bse` | 北交所 |
+```json
+// 获取当前时间
+{"name": "get_current_time", "arguments": {}}
 
-### MCP服务器
+// 综合分析股票
+{"name": "analyze_stock", "arguments": {"code": "601138"}}
 
-启动MCP服务器：
-
-```bash
-python mcp_server.py
+// 市场筛选
+{"name": "screen_market", "arguments": {
+    "board": "a_share",
+    "position_max": 30,
+    "pe_ttm_max": 20,
+    "limit": 50
+}}
 ```
 
-配置文件：`mcp_config.json`
+## Agent使用规则
 
-#### 能力边界
+1. **必须先调用 `get_current_time`**：确定分析截止日期和交易时段
+2. **全市场筛选必须用 `screen_market`**：并提供至少一个筛选条件
+3. **个股分析用 `analyze_stock`**：一次调用获取完整分析
+4. **批量获取用 `get_latest_data`**：最多30只，大量请先筛选
 
-- `screen_market`：输入市场范围、筛选条件、排序和分页参数；返回符合条件的股票列表和数量信息。
-- `screen_main_board`：兼容入口，等价于 `screen_market(board="main")`。
-- `start_market_sync` / `get_market_sync_status` / `cancel_market_sync`：输入市场范围和任务参数；返回任务 ID、状态和进度。
-- 任务状态可通过 `get_market_sync_status` 查询；服务重启后未完成任务会标记为 `interrupted`，可重新启动任务继续处理。
-- `get_stock_universe`：从外部行情接口获取候选股票代码列表，适用于小范围候选分析，不作为全市场/板块筛选的主入口。
-- `update_stock` / `update_stocks` / `update_minute_data`：输入股票代码和时间范围参数；返回更新结果。
-- `get_daily_data` / `get_valuation_data` / `get_technical_data` / `get_latest_data` / `analyze_position` / `analyze_intraday`：面向调用方表现为获取/分析股票数据。
-- `get_realtime_price` / `get_realtime_prices`：按给定股票代码直连外部 API 获取实时行情，但不负责发现股票代码。
-- 全市场/板块筛选必须走 `screen_market`。其他工具只处理用户或 Agent 已明确给出的股票代码列表。
-
-#### MCP工具列表
-
-> Agent 使用规则：每次股票分析任务开始前必须先调用 `get_current_time`，以返回的 `date` 作为默认分析截止日期，并结合 `is_trading_time` / `trading_session` 判断是否正在交易、是否需要关注实时行情。
-> 全市场/板块筛选规则：必须调用 `screen_market`，且必须提供至少一个筛选条件。不要自行循环全量候选代码。
-> 个股深度分析规则：筛选后逐只或小批次分析，完成一只再进入下一只；不要一次性读取所有候选详情。
-
-`get_current_time` 返回字段包括：
-
-- `datetime` / `date` / `time`：北京时间（Asia/Shanghai）
-- `timestamp`：Unix 时间戳
-- `is_trading_day`：是否为工作日交易日（不含节假日日历判断）
-- `is_trading_time`：是否处于 A 股连续竞价交易时段（09:30-11:30 或 13:00-15:00）
-- `trading_session`：`pre_market`、`morning_trading`、`lunch_break`、`afternoon_trading`、`after_market`、`non_trading_day`
-
-当 `get_daily_data` 的查询范围包含当前日期，或调用 `get_latest_data` 获取最新综合数据时，服务会尝试直连实时行情 API 补充：
-
-- `realtime_used`：是否成功使用实时行情
-- `realtime_price`：实时价格
-- `effective_close`：分析推荐优先使用的有效价格（实时价优先，否则最近收盘价）
-- `effective_price_source`：`realtime` 或 `historical_close`
-- `time_context`：本次数据对应的当前时间与交易时段上下文
-
-| 工具 | 说明 |
-|------|------|
-| get_current_time | 强制前置工具；获取当前北京时间、交易日/交易时段状态，用于确定分析截止日期 |
-| screen_market | 输入范围、筛选条件、排序和分页参数；返回股票列表和数量信息 |
-| screen_main_board | 主板筛选兼容入口 |
-| start_market_sync | 启动市场数据更新任务，返回任务 ID 和进度 |
-| get_market_sync_status | 查询市场数据更新任务状态 |
-| cancel_market_sync | 请求取消正在运行的市场数据更新任务 |
-| get_stock_universe | 从外部行情接口获取候选股票列表，供小范围候选分析使用 |
-| update_stock | 按给定代码更新单只股票数据，不自动枚举全市场 |
-| update_stocks | 按给定代码列表批量更新股票数据，不自动枚举全市场 |
-| get_stock_info | 获取股票基本信息 |
-| get_daily_data | 获取日K线；若查询范围涉及今天，会在已有日K基础上自动补充实时行情 |
-| get_valuation_data | 获取估值数据 |
-| get_technical_data | 获取技术指标 |
-| get_latest_data | 批量获取给定代码列表的最新数据；仅适合小批量候选详情读取，大量代码建议关闭实时补价 |
-| get_realtime_price | 实时获取单只股票当前价格，直连外部API |
-| get_realtime_prices | 批量实时获取股票当前价格，直连外部API |
-| analyze_position | 基于给定代码列表的可用历史数据分析52周位置，不是全市场筛选器 |
-| check_missing_data | 检查给定代码列表在指定日期范围内的缺失数据 |
-| update_minute_data | 按给定代码更新分钟K线数据 |
-| get_minute_data | 获取分钟K线 |
-| analyze_intraday | 基于可用日K、技术指标和分钟K线做日内走势分析 |
-
-## 分析逻辑
-
-### 52周位置
+### 推荐流程
 
 ```
-position_pct = (当前价 - 52周最低) / (52周最高 - 52周最低) * 100
+1. get_current_time     # 确定时间
+2. screen_market        # 筛选候选
+3. analyze_stock        # 逐只分析
 ```
 
-当前实现使用每个交易日向前最多250个交易日的滚动窗口，避免历史指标使用未来高低点。
-
-| 位置 | 百分比 | 风险 |
-|------|--------|------|
-| 低位 | < 30% | 低 |
-| 中位 | 30-70% | 中 |
-| 中高位 | 70-90% | 中高 |
-| 高位 | >= 90% | 高 |
-
-## 文件说明
+## 文件结构
 
 ```
 stock_pool/
-├── __init__.py       # 模块入口
-├── stock_pool.py     # 核心代码
-├── api_provider.py   # API提供者（降级机制）
-├── mcp_server.py     # MCP服务器
-├── mcp_config.json   # MCP配置
-└── README.md         # 文档
+├── mcp_server.py        # MCP服务器
+├── mcp_tools.py         # MCP工具定义
+├── stock_pool.py        # 核心功能类
+├── provider_manager.py  # 数据源管理
+├── storage.py           # 数据库存储
+├── indicators.py        # 技术指标计算
+├── errors.py            # 错误处理
+├── providers/           # 数据源实现
+│   ├── base.py          # 基类
+│   ├── eastmoney.py     # 东方财富
+│   ├── sina.py          # 新浪财经
+│   ├── tencent.py       # 腾讯财经
+│   ├── netease.py       # 网易财经
+│   ├── akshare.py       # AkShare
+│   ├── baostock.py      # Baostock
+│   └── tushare.py       # TuShare Pro
+└── README.md
+```
+
+## 配置
+
+### TuShare Pro（可选）
+
+```bash
+export TUSHARE_TOKEN=your_token
+```
+
+### MCP配置
+
+```json
+{
+  "mcpServers": {
+    "stock-pool": {
+      "command": "python",
+      "args": ["mcp_server.py"],
+      "cwd": "/path/to/stock_pool"
+    }
+  }
+}
 ```
 
 ## 注意事项
 
-1. API有调用限制，建议设置延迟1.5-2秒
-2. MCP服务器需要Python 3.7+
-3. API降级机制自动处理超时和限流
-4. 财务/资金流向拉取仍需后续实现
-5. 腾讯/网易当前主要用于实时行情备用，尚未实现完整K线历史数据解析
+1. API有调用限制，建议设置适当延迟
+2. 52周位置依赖本地数据库，需先同步数据
+3. TuShare为付费服务，需配置Token
+4. 项目日志输出到stderr，不影响MCP通信

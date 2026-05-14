@@ -10,170 +10,49 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from stock_pool.stock_pool import StockDataPool
-from stock_pool.api_provider import StockAPIProvider
 from stock_pool import mcp_server
+from stock_pool.provider_manager import ProviderManager
 
-class TestAPIProvider(unittest.TestCase):
+
+class TestProviderManager(unittest.TestCase):
     
     def setUp(self):
-        self.api = StockAPIProvider()
+        self.manager = ProviderManager()
         self.test_codes = ['601138', '600487', '000333']
     
-    def test_fetch_kline_eastmoney(self):
-        print("\n[测试] 东方财富K线API")
-        for code in self.test_codes[:1]:
-            klines = self.api.fetch_kline_eastmoney(code, days=10)
-            self.assertIsNotNone(klines, f"获取 {code} K线失败")
-            self.assertGreater(len(klines), 0, "K线数据为空")
-            print(f"  {code}: {len(klines)} 条")
-            time.sleep(0.5)
+    def test_providers_loaded(self):
+        print("\n[测试] 数据源加载")
+        providers = self.manager.get_all_providers()
+        self.assertGreater(len(providers), 0, "至少应加载一个数据源")
+        for name, provider in providers.items():
+            print(f"  {provider.display_name}: 优先级={provider.priority}, 能力={len(provider.capabilities)}")
     
-    def test_fetch_kline_sina(self):
-        print("\n[测试] 新浪K线API")
-        for code in self.test_codes[:1]:
-            klines = self.api.fetch_kline_sina(code, days=10)
-            if klines:
-                print(f"  {code}: {len(klines)} 条")
-            time.sleep(0.5)
+    def test_capability_index(self):
+        print("\n[测试] 能力索引")
+        from stock_pool.providers.base import ProviderCapability
+        for cap in ProviderCapability:
+            providers = self.manager.get_providers_for_capability(cap)
+            print(f"  {cap.value}: {providers}")
     
-    def test_fetch_realtime_eastmoney(self):
-        print("\n[测试] 东方财富实时数据API")
+    def test_realtime_quote(self):
+        print("\n[测试] 实时行情获取")
         for code in self.test_codes[:1]:
-            data = self.api.fetch_realtime_eastmoney(code)
-            if data:
-                self.assertIn('name', data)
-                print(f"  {code}: {data.get('name')}")
+            result = self.manager.get_realtime_quote(code)
+            if result.success:
+                print(f"  {code}: {result.data.get('name', 'N/A')}")
             else:
-                print(f"  {code}: 实时数据获取失败，跳过验证")
+                print(f"  {code}: 获取失败 - {result.error.message if result.error else 'unknown'}")
             time.sleep(0.5)
     
-    def test_fetch_realtime_sina(self):
-        print("\n[测试] 新浪实时数据API")
+    def test_daily_kline(self):
+        print("\n[测试] 日K线获取")
         for code in self.test_codes[:1]:
-            data = self.api.fetch_realtime_sina(code)
-            if data:
-                print(f"  {code}: {data.get('name')}")
+            result = self.manager.get_daily_kline(code, days=10)
+            if result.success:
+                print(f"  {code}: {len(result.data)} 条K线")
+            else:
+                print(f"  {code}: 获取失败 - {result.error.message if result.error else 'unknown'}")
             time.sleep(0.5)
-    
-    def test_api_fallback(self):
-        print("\n[测试] API降级机制")
-        self.api.api_status['eastmoney']['available'] = False
-        self.api.api_status['sina']['available'] = False
-        
-        available = self.api.get_available_api()
-        self.assertIn(available, ['tencent', 'netease', 'eastmoney'])
-        print(f"  所有API不可用时，重置为: {available}")
-        
-        for name in self.api.api_status:
-            self.api.api_status[name]['available'] = True
-            self.api.api_status[name]['error_count'] = 0
-    
-    def test_error_count_and_disable(self):
-        print("\n[测试] 错误计数与禁用")
-        api = StockAPIProvider()
-        api._mark_api_error('eastmoney', "test error 1")
-        api._mark_api_error('eastmoney', "test error 2")
-        self.assertEqual(api.api_status['eastmoney']['error_count'], 2)
-        self.assertTrue(api.api_status['eastmoney']['available'])
-        
-        api._mark_api_error('eastmoney', "test error 3")
-        self.assertFalse(api.api_status['eastmoney']['available'])
-        print(f"  连续3次错误后禁用: {api.api_status['eastmoney']['available']}")
-        
-        api._mark_api_success('eastmoney')
-        self.assertTrue(api.api_status['eastmoney']['available'])
-        self.assertEqual(api.api_status['eastmoney']['error_count'], 0)
-
-    def test_fetch_stock_universe_uses_external_api(self):
-        print("\n[测试] 股票池列表来自外部API")
-        api = StockAPIProvider()
-        calls = []
-
-        class FakeResponse:
-            def json(self):
-                return {
-                    'data': {
-                        'total': 2,
-                        'diff': [
-                            {'f12': '600000', 'f13': 1, 'f14': '浦发银行', 'f20': 1, 'f21': 1, 'f100': '银行'},
-                            {'f12': '000001', 'f13': 0, 'f14': '平安银行', 'f20': 2, 'f21': 2, 'f100': '银行'},
-                        ]
-                    }
-                }
-
-        def fake_request(url, params=None, headers=None, timeout=None):
-            calls.append((url, params))
-            return FakeResponse()
-
-        api._request_with_retry = fake_request
-        result = api.fetch_stock_universe('main', page_size=500)
-
-        self.assertEqual(result['source'], 'eastmoney')
-        self.assertEqual(result['codes'], ['600000', '000001'])
-        self.assertEqual([item['market'] for item in result['stocks']], ['SH', 'SZ'])
-        self.assertIn('m:1+t:2,m:0+t:6', calls[0][1]['fs'])
-        print(f"  外部接口返回: {result['codes']}")
-
-    def test_stock_universe_native_pagination(self):
-        print("\n[测试] 股票池原生分页参数")
-        api = StockAPIProvider()
-        calls = []
-
-        class FakeResponse:
-            def json(self):
-                return {
-                    'data': {
-                        'total': 120,
-                        'diff': [
-                            {'f12': '000050', 'f13': 0, 'f14': '分页样本', 'f20': 1, 'f21': 1, 'f100': '测试'},
-                        ]
-                    }
-                }
-
-        def fake_request(url, params=None, headers=None, timeout=None):
-            calls.append(params)
-            return FakeResponse()
-
-        api._request_with_retry = fake_request
-        result = api.fetch_stock_universe('main', page=2, page_size=50)
-
-        self.assertEqual(calls[0]['pn'], '2')
-        self.assertEqual(calls[0]['pz'], '50')
-        self.assertEqual(result['page'], 2)
-        self.assertEqual(result['page_size'], 50)
-        self.assertTrue(result['has_more'])
-        self.assertEqual(result['codes'], ['000050'])
-        print("  原生 pn/pz 已透出")
-
-    def test_stock_universe_supports_required_markets(self):
-        print("\n[测试] 股票池支持全A/创业板/科创板")
-        api = StockAPIProvider()
-        seen_fs = []
-
-        class FakeResponse:
-            def json(self):
-                return {
-                    'data': {
-                        'total': 1,
-                        'diff': [{'f12': '300001', 'f13': 0, 'f14': '测试股票', 'f20': 1, 'f21': 1, 'f100': '测试'}]
-                    }
-                }
-
-        def fake_request(url, params=None, headers=None, timeout=None):
-            seen_fs.append(params['fs'])
-            return FakeResponse()
-
-        api._request_with_retry = fake_request
-
-        api.fetch_stock_universe('a_share', limit=1)
-        api.fetch_stock_universe('gem', limit=1)
-        api.fetch_stock_universe('star', limit=1)
-
-        self.assertIn('m:1+t:23', seen_fs[0])
-        self.assertIn('m:0+t:80', seen_fs[0])
-        self.assertEqual(seen_fs[1], 'm:0+t:80')
-        self.assertEqual(seen_fs[2], 'm:1+t:23')
-        print("  全A/创业板/科创板范围参数已覆盖")
 
 
 class TestMCPToolBoundaries(unittest.TestCase):
@@ -205,256 +84,43 @@ class TestMCPToolBoundaries(unittest.TestCase):
         self.assertEqual(public_result['skipped']['missing_data'], 2)
         print("  MCP对外契约未暴露存储实现细节")
 
-    def test_mcp_does_not_expose_cache_stats_as_analysis_source(self):
+    def test_mcp_tool_count(self):
+        print("\n[测试] MCP工具数量")
         tool_names = [tool['name'] for tool in mcp_server.TOOLS]
-
+        print(f"  当前工具数量: {len(tool_names)}")
+        print(f"  工具列表: {tool_names}")
+        
         self.assertIn('screen_market', tool_names)
-        self.assertIn('start_market_sync', tool_names)
-        self.assertIn('get_market_sync_status', tool_names)
-        self.assertIn('cancel_market_sync', tool_names)
+        self.assertIn('get_current_time', tool_names)
+        self.assertIn('get_realtime_quote', tool_names)
+        self.assertIn('analyze_stock', tool_names)
+        
         self.assertNotIn('get_cache_stats', tool_names)
         self.assertNotIn('get_db_stats', tool_names)
-        self.assertIn('screen_main_board', tool_names)
+        self.assertNotIn('start_market_sync', tool_names)
+        self.assertNotIn('update_stocks', tool_names)
+        print("  工具列表验证通过")
 
-        legacy_cache = mcp_server.handle_tool_call('get_cache_stats', {})
-        legacy_db = mcp_server.handle_tool_call('get_db_stats', {})
+    def test_screen_market_requires_filter(self):
+        print("\n[测试] 市场筛选需要条件")
         no_filter_screen = mcp_server.handle_tool_call('screen_market', {})
-
-        self.assertFalse(legacy_cache['success'])
-        self.assertFalse(legacy_db['success'])
         self.assertFalse(no_filter_screen['success'])
-        self.assertNotIn('data', legacy_cache)
-        self.assertNotIn('data', legacy_db)
-        self.assertIn('screen_market', legacy_cache['error'])
-        self.assertIn('筛选条件', no_filter_screen['error'])
-        print("  MCP未暴露缓存统计为分析入口")
+        self.assertIn('筛选条件', no_filter_screen.get('error', ''))
+        print("  无条件筛选被正确拒绝")
 
-    def test_market_sync_job_lifecycle(self):
-        print("\n[测试] MCP市场同步任务生命周期")
-        original_sync_market = mcp_server.pool.sync_market
-        with mcp_server.SYNC_JOBS_LOCK:
-            mcp_server.SYNC_JOBS.clear()
+    def test_get_latest_data_limit(self):
+        print("\n[测试] 批量数据限制")
+        codes = [f'{i:06d}' for i in range(35)]
+        result = mcp_server.handle_tool_call('get_latest_data', {'codes': codes})
+        self.assertFalse(result['success'])
+        self.assertIn('最多', result.get('error', ''))
+        print("  超量请求被正确拒绝")
 
-        def fake_sync_market(**kwargs):
-            progress_callback = kwargs.get('progress_callback')
-            if progress_callback:
-                progress_callback({
-                    'success': True,
-                    'board': kwargs.get('board'),
-                    'refresh': kwargs.get('refresh'),
-                    'total': 2,
-                    'scanned': 1,
-                    'refreshed': 1,
-                    'skipped_fresh': 0,
-                    'failed': 0,
-                    'current_code': '000001',
-                })
-            return {
-                'success': True,
-                'board': kwargs.get('board'),
-                'refresh': kwargs.get('refresh'),
-                'total': 2,
-                'scanned': 2,
-                'refreshed': 2,
-                'skipped_fresh': 0,
-                'failed': 0,
-                'stopped': False,
-                'current_code': None,
-                'failures': [],
-            }
-
-        try:
-            mcp_server.pool.sync_market = fake_sync_market
-            started = mcp_server.handle_tool_call('start_market_sync', {
-                'board': 'gem',
-                'refresh': 'stale',
-                'max_codes': 2,
-                'delay': 0,
-            })
-            self.assertTrue(started['success'])
-            job_id = started['job']['job_id']
-
-            status = None
-            for _ in range(50):
-                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
-                if status['success'] and status['job']['status'] == 'completed':
-                    break
-                time.sleep(0.02)
-
-            self.assertTrue(status['success'])
-            self.assertEqual(status['job']['status'], 'completed')
-            self.assertEqual(status['job']['result']['refreshed'], 2)
-
-            with mcp_server.SYNC_JOBS_LOCK:
-                mcp_server.SYNC_JOBS.clear()
-            persisted_status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
-            self.assertTrue(persisted_status['success'])
-            self.assertEqual(persisted_status['job']['status'], 'completed')
-            self.assertEqual(persisted_status['job']['result']['refreshed'], 2)
-
-            listed = mcp_server.handle_tool_call('get_market_sync_status', {})
-            self.assertTrue(listed['success'])
-            self.assertGreaterEqual(len(listed['jobs']), 1)
-            print(f"  同步任务完成: {job_id}")
-        finally:
-            mcp_server.pool.sync_market = original_sync_market
-
-    def test_mcp_rejects_large_small_batch_tools(self):
-        print("\n[测试] MCP拒绝过大的小批量请求")
-        detail_codes = [f'{i:06d}' for i in range(mcp_server.MAX_DETAIL_CODES + 1)]
-        update_codes = [f'{i:06d}' for i in range(mcp_server.MAX_UPDATE_CODES + 1)]
-        realtime_codes = [f'{i:06d}' for i in range(mcp_server.MAX_REALTIME_CODES + 1)]
-
-        latest = mcp_server.handle_tool_call('get_latest_data', {'codes': detail_codes})
-        update = mcp_server.handle_tool_call('update_stocks', {'codes': update_codes})
-        realtime = mcp_server.handle_tool_call('get_realtime_prices', {'codes': realtime_codes})
-
-        self.assertFalse(latest['success'])
-        self.assertFalse(update['success'])
-        self.assertFalse(realtime['success'])
-        self.assertIn('screen_market', latest['error'])
-        self.assertIn('start_market_sync', update['error'])
-        self.assertIn('逐只或小批次', realtime['error'])
-        print("  大列表已被引导到筛选/同步流程")
-
-    def test_mcp_large_update_stocks_runs_in_background(self):
-        print("\n[测试] MCP较大批量更新转后台任务")
-        original_update_stock = mcp_server.pool.update_stock
-        with mcp_server.SYNC_JOBS_LOCK:
-            mcp_server.SYNC_JOBS.clear()
-
-        updated = []
-
-        def fake_update_stock(code, days=250, delay=1.5, force=False):
-            updated.append((code, days, delay))
-
-        try:
-            mcp_server.pool.update_stock = fake_update_stock
-            codes = [f'{i:06d}' for i in range(mcp_server.MAX_INLINE_UPDATE_CODES + 1)]
-            started = mcp_server.handle_tool_call('update_stocks', {
-                'codes': codes,
-                'days': 10,
-                'delay': 0,
-            })
-
-            self.assertTrue(started['success'])
-            self.assertIn('job', started)
-            job_id = started['job']['job_id']
-
-            status = None
-            for _ in range(30):
-                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
-                if status['job']['status'] == 'completed':
-                    break
-                time.sleep(0.05)
-
-            self.assertEqual(status['job']['status'], 'completed')
-            self.assertEqual(status['job']['result']['updated'], len(codes))
-            self.assertEqual(len(updated), len(codes))
-            print(f"  后台任务完成: {job_id}")
-        finally:
-            mcp_server.pool.update_stock = original_update_stock
-            with mcp_server.SYNC_JOBS_LOCK:
-                mcp_server.SYNC_JOBS.clear()
-
-    def test_mcp_update_stocks_progress_and_delay(self):
-        print("\n[测试] MCP后台更新进度和delay参数")
-        original_update_stock = mcp_server.pool.update_stock
-        with mcp_server.SYNC_JOBS_LOCK:
-            mcp_server.SYNC_JOBS.clear()
-
-        updated = []
-        call_times = []
-
-        def fake_update_stock(code, days=250, delay=1.5, force=False):
-            updated.append((code, days, delay, force))
-            call_times.append(time.time())
-
-        try:
-            mcp_server.pool.update_stock = fake_update_stock
-            codes = [f'{i:06d}' for i in range(mcp_server.MAX_INLINE_UPDATE_CODES + 1)]
-            started = mcp_server.handle_tool_call('update_stocks', {
-                'codes': codes,
-                'days': 10,
-                'delay': 0.1,
-                'force': True,
-            })
-
-            self.assertTrue(started['success'])
-            self.assertIn('job', started, "应启动后台任务")
-            job_id = started['job']['job_id']
-
-            status = None
-            for _ in range(30):
-                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
-                if status['job']['status'] == 'completed':
-                    break
-                time.sleep(0.05)
-
-            self.assertEqual(status['job']['status'], 'completed')
-            result = status['job']['result']
-            
-            self.assertEqual(result['total'], len(codes))
-            self.assertEqual(result['scanned'], len(codes), "scanned应等于total")
-            self.assertEqual(result['updated'], len(codes))
-            self.assertIsNone(result['current_code'], "任务完成后current_code应为None")
-            
-            self.assertEqual(len(updated), len(codes))
-            for i, (code, days, delay, force) in enumerate(updated):
-                self.assertEqual(code, codes[i])
-                self.assertEqual(days, 10)
-                self.assertEqual(delay, 0.1, f"delay应正确传递，实际为{delay}")
-                self.assertTrue(force, "force应正确传递")
-            
-            print(f"  进度验证通过: scanned={result['scanned']}, updated={result['updated']}")
-            print(f"  delay验证通过: 所有调用delay=0.1")
-        finally:
-            mcp_server.pool.update_stock = original_update_stock
-            with mcp_server.SYNC_JOBS_LOCK:
-                mcp_server.SYNC_JOBS.clear()
-
-    def test_mcp_heavy_screen_market_runs_in_background(self):
-        print("\n[测试] MCP重筛选转后台任务")
-        original_screen_market = mcp_server.pool.screen_market
-        with mcp_server.SYNC_JOBS_LOCK:
-            mcp_server.SYNC_JOBS.clear()
-
-        def fake_screen_market(arguments):
-            return {
-                'success': True,
-                'board': arguments.get('board', 'a_share'),
-                'matched_count': 1,
-                'returned': 1,
-                'results': [{'code': '000001'}],
-            }
-
-        try:
-            mcp_server.pool.screen_market = fake_screen_market
-            started = mcp_server.handle_tool_call('screen_market', {
-                'board': 'a_share',
-                'position_min': 0.7,
-                'limit': 50,
-                'include_realtime': True,
-            })
-
-            self.assertTrue(started['success'])
-            self.assertIn('job', started)
-            job_id = started['job']['job_id']
-
-            status = None
-            for _ in range(30):
-                status = mcp_server.handle_tool_call('get_market_sync_status', {'job_id': job_id})
-                if status['job']['status'] == 'completed':
-                    break
-                time.sleep(0.05)
-
-            self.assertEqual(status['job']['status'], 'completed')
-            self.assertEqual(status['job']['result']['returned'], 1)
-            print(f"  后台筛选完成: {job_id}")
-        finally:
-            mcp_server.pool.screen_market = original_screen_market
-            with mcp_server.SYNC_JOBS_LOCK:
-                mcp_server.SYNC_JOBS.clear()
+    def test_analyze_stock(self):
+        print("\n[测试] 综合分析工具")
+        result = mcp_server.handle_tool_call('analyze_stock', {'code': '601138'})
+        self.assertIn('success', result)
+        print(f"  分析结果: success={result.get('success')}")
 
 
 class TestStockDataPool(unittest.TestCase):
@@ -1119,7 +785,8 @@ def run_tests():
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     
-    suite.addTests(loader.loadTestsFromTestCase(TestAPIProvider))
+    suite.addTests(loader.loadTestsFromTestCase(TestProviderManager))
+    suite.addTests(loader.loadTestsFromTestCase(TestMCPToolBoundaries))
     suite.addTests(loader.loadTestsFromTestCase(TestStockDataPool))
     suite.addTests(loader.loadTestsFromTestCase(TestDatabaseIntegrity))
     

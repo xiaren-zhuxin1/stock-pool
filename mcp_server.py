@@ -65,16 +65,21 @@ class LRUCache:
         self.ttl = ttl
         self.cache: OrderedDict = OrderedDict()
         self.lock = threading.Lock()
+        self._hits = 0
+        self._misses = 0
     
     def get(self, key: str) -> Optional[Any]:
         with self.lock:
             if key not in self.cache:
+                self._misses += 1
                 return None
             value, timestamp = self.cache[key]
             if time.time() - timestamp > self.ttl:
                 del self.cache[key]
+                self._misses += 1
                 return None
             self.cache.move_to_end(key)
+            self._hits += 1
             return value
     
     def set(self, key: str, value: Any) -> None:
@@ -88,6 +93,20 @@ class LRUCache:
     def clear(self) -> None:
         with self.lock:
             self.cache.clear()
+            self._hits = 0
+            self._misses = 0
+    
+    def stats(self) -> Dict[str, Any]:
+        with self.lock:
+            total = self._hits + self._misses
+            hit_rate = self._hits / total * 100 if total > 0 else 0
+            return {
+                'size': len(self.cache),
+                'max_size': self.max_size,
+                'hits': self._hits,
+                'misses': self._misses,
+                'hit_rate_pct': round(hit_rate, 2),
+            }
 
 
 def cached(cache_instance: LRUCache, key_func: Callable):
@@ -197,8 +216,7 @@ class StockPoolServer:
 
         self._init_db()
         self.provider_manager = ProviderManager(self.config.get('providers', {}))
-        self._screener_cache = {}
-        self._screener_cache_time = {}
+        self._screener_cache = LRUCache(max_size=10, ttl=14400)
         logger.info("StockPoolServer 初始化完成")
 
     def _connect(self) -> sqlite3.Connection:
@@ -418,7 +436,12 @@ class StockPoolServer:
     def _fetch_and_save_realtime(self, code: str) -> Dict[str, Any]:
         result = self.provider_manager.fetch_realtime(code)
         if not result.success:
-            return {'success': False, 'code': code, 'message': result.error.message}
+            return create_error_response(
+                message=result.error.message,
+                error_code='API_ERROR',
+                recoverable=True,
+                suggested_action="请稍后重试或检查股票代码是否正确",
+            )
 
         realtime = dict(result.data)
         realtime.update({
@@ -827,13 +850,23 @@ class StockPoolServer:
     def analyze_main_force(self, code, days=10):
         fund_flow_data = self.get_fund_flow(code, limit=days)
         if not fund_flow_data:
-            return {'code': code, 'success': False, 'error': '无资金流向数据'}
+            return create_error_response(
+                message=f"股票 {code} 无资金流向数据",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请先同步该股票的资金流向数据",
+            )
 
         main_inflows = [item['main_net_inflow'] for item in fund_flow_data if item.get('main_net_inflow')]
         main_inflow_pcts = [item['main_net_inflow_pct'] for item in fund_flow_data if item.get('main_net_inflow_pct')]
 
         if not main_inflows:
-            return {'code': code, 'success': False, 'error': '无有效主力资金数据'}
+            return create_error_response(
+                message=f"股票 {code} 无有效主力资金数据",
+                error_code='DATA_NOT_FOUND',
+                recoverable=True,
+                suggested_action="请检查数据完整性或稍后重试",
+            )
 
         total_main_inflow = sum(main_inflows)
         avg_main_inflow = total_main_inflow / len(main_inflows)
@@ -1042,11 +1075,10 @@ class StockPoolServer:
     @performance_monitor
     def _fetch_screener_data(self, board: str = 'a_share') -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         cache_key = f"screener_{board}"
-        cache_ttl = 14400
-        cached_time = self._screener_cache_time.get(cache_key, 0)
-        if cache_key in self._screener_cache and (time.time() - cached_time) < cache_ttl:
-            logger.info(f"筛选缓存命中: {board}, {len(self._screener_cache[cache_key])}只")
-            return self._screener_cache[cache_key], None
+        cached = self._screener_cache.get(cache_key)
+        if cached:
+            logger.info(f"筛选缓存命中: {board}, {len(cached)}只")
+            return cached, None
 
         board_map = {
             'a_share': 'm:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23',
@@ -1149,9 +1181,8 @@ class StockPoolServer:
             time.sleep(0.3)
 
         if all_stocks:
-            self._screener_cache[cache_key] = all_stocks
-            self._screener_cache_time[cache_key] = time.time()
-            logger.info(f"筛选数据已缓存: {board}, {len(all_stocks)}只, TTL={cache_ttl}s")
+            self._screener_cache.set(cache_key, all_stocks)
+            logger.info(f"筛选数据已缓存: {board}, {len(all_stocks)}只")
 
         return all_stocks, last_error
 
@@ -1238,7 +1269,12 @@ class StockPoolServer:
                 filters[key] *= 100
         has_filter = any(value is not None for value in filters.values())
         if not has_filter and not criteria.get('allow_no_filters', False):
-            return {'success': False, 'error': '市场筛选必须提供至少一个筛选条件，例如 position_max、pe_ttm_max、pb_max 或 market_cap_min。'}
+            return create_error_response(
+                message='市场筛选必须提供至少一个筛选条件',
+                error_code='VALIDATION_ERROR',
+                recoverable=True,
+                suggested_action='请提供 position_max、pe_ttm_max、pb_max 或 market_cap_min 等筛选条件',
+            )
 
         all_stocks, api_error = self._fetch_screener_data(board)
         
