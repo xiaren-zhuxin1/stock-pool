@@ -7,8 +7,10 @@ import builtins
 import sqlite3
 import threading
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Callable
 from contextlib import contextmanager
+from functools import wraps
+from collections import OrderedDict
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -56,6 +58,69 @@ from sync_jobs import SyncJobStore, json_dumps, json_loads, sync_job_from_row
 def _log(*args, **kwargs):
     kwargs.setdefault('file', sys.stderr)
     return builtins.print(*args, **kwargs)
+
+
+class LRUCache:
+    def __init__(self, max_size: int = 100, ttl: int = 300):
+        self.max_size = max_size
+        self.ttl = ttl
+        self.cache: OrderedDict = OrderedDict()
+        self.lock = threading.Lock()
+    
+    def get(self, key: str) -> Optional[Any]:
+        with self.lock:
+            if key not in self.cache:
+                return None
+            value, timestamp = self.cache[key]
+            if time.time() - timestamp > self.ttl:
+                del self.cache[key]
+                return None
+            self.cache.move_to_end(key)
+            return value
+    
+    def set(self, key: str, value: Any) -> None:
+        with self.lock:
+            if key in self.cache:
+                del self.cache[key]
+            elif len(self.cache) >= self.max_size:
+                self.cache.popitem(last=False)
+            self.cache[key] = (value, time.time())
+    
+    def clear(self) -> None:
+        with self.lock:
+            self.cache.clear()
+
+
+def cached(cache_instance: LRUCache, key_func: Callable):
+    def decorator(func: Callable) -> Callable:
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            cache_key = key_func(*args, **kwargs)
+            cached_result = cache_instance.get(cache_key)
+            if cached_result is not None:
+                return cached_result
+            result = func(*args, **kwargs)
+            cache_instance.set(cache_key, result)
+            return result
+        return wrapper
+    return decorator
+
+
+def performance_monitor(func: Callable) -> Callable:
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        start_time = time.time()
+        try:
+            result = func(*args, **kwargs)
+            elapsed = time.time() - start_time
+            if elapsed > 1.0:
+                logger.warning(f"性能警告: {func.__name__} 执行耗时 {elapsed:.2f}秒")
+            return result
+        except Exception as e:
+            elapsed = time.time() - start_time
+            logger.error(f"执行失败: {func.__name__} 耗时 {elapsed:.2f}秒, 错误: {e}")
+            raise
+    return wrapper
 
 
 _SANITIZE_DROP = object()
@@ -114,6 +179,10 @@ DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'stock_pool.d
 SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 logger = Logger()
 
+_time_cache = LRUCache(max_size=10, ttl=60)
+_stock_info_cache = LRUCache(max_size=1000, ttl=300)
+_valuation_cache = LRUCache(max_size=500, ttl=300)
+
 
 class StockPoolServer:
     def __init__(self, config: Optional[Dict[str, Any]] = None):
@@ -149,6 +218,7 @@ class StockPoolServer:
         conn.close()
 
     @staticmethod
+    @cached(_time_cache, lambda now=None: f"time_info:{now.isoformat() if now else 'current'}")
     def get_current_time_info(now: Optional[datetime] = None) -> Dict[str, Any]:
         if now is None:
             now = datetime.now(SHANGHAI_TZ)
@@ -226,31 +296,31 @@ class StockPoolServer:
         return item
 
     @staticmethod
-    def _normalize_limit(limit):
+    def _normalize_limit(limit: Optional[int]) -> Optional[int]:
         if limit is None:
             return None
         try:
             limit = int(limit)
         except (TypeError, ValueError):
-            raise ValueError('limit 必须是正整数')
+            raise ValidationError('limit 必须是正整数', field='limit', value=limit)
         if limit <= 0 or limit > 10000:
-            raise ValueError('limit 必须在 1 到 10000 之间')
+            raise ValidationError('limit 必须在 1 到 10000 之间', field='limit', value=limit)
         return limit
 
     @staticmethod
-    def _normalize_offset(offset):
+    def _normalize_offset(offset: Optional[int]) -> int:
         if offset is None:
             return 0
         try:
             offset = int(offset)
         except (TypeError, ValueError):
-            raise ValueError('offset 必须是非负整数')
+            raise ValidationError('offset 必须是非负整数', field='offset', value=offset)
         if offset < 0 or offset > 1000000:
-            raise ValueError('offset 必须在 0 到 1000000 之间')
+            raise ValidationError('offset 必须在 0 到 1000000 之间', field='offset', value=offset)
         return offset
 
     @staticmethod
-    def _normalize_positive_int(value, default, maximum):
+    def _normalize_positive_int(value: Optional[int], default: int, maximum: int) -> int:
         try:
             value = int(value)
         except (TypeError, ValueError):
@@ -258,7 +328,7 @@ class StockPoolServer:
         return max(0, min(value, maximum))
 
     @staticmethod
-    def _to_number(value):
+    def _to_number(value: Any) -> Optional[float]:
         if value is None or value == '':
             return None
         try:
@@ -267,7 +337,8 @@ class StockPoolServer:
             return None
 
     @staticmethod
-    def _passes_range(value, min_value=None, max_value=None):
+    def _passes_range(value: Optional[float], min_value: Optional[float] = None, 
+                      max_value: Optional[float] = None) -> bool:
         if min_value is None and max_value is None:
             return True
         if value is None:
@@ -500,6 +571,7 @@ class StockPoolServer:
             'resolution': resolution,
         }
 
+    @performance_monitor
     def update_stock(self, code: str, days: int = 250, delay: float = 1.5, force: bool = False) -> Dict[str, Any]:
         _log(f"更新 {code}...")
 
@@ -930,7 +1002,8 @@ class StockPoolServer:
             ],
         }
 
-    def screen_market(self, criteria=None):
+    @performance_monitor
+    def screen_market(self, criteria: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         criteria = dict(criteria or {})
         board = criteria.get('board') or criteria.get('market') or 'a_share'
         limit = self._normalize_positive_int(criteria.get('limit'), 50, 200)
@@ -1056,7 +1129,10 @@ class StockPoolServer:
             'time_context': self.get_current_time_info(),
         }
 
-    def sync_market(self, board='a_share', refresh='stale', max_codes=None, days=250, delay=0.2):
+    @performance_monitor
+    def sync_market(self, board: str = 'a_share', refresh: str = 'stale', 
+                   max_codes: Optional[int] = None, days: int = 250, delay: float = 0.2,
+                   progress_callback: Optional[Callable[[Dict], None]] = None) -> Dict[str, Any]:
         if refresh not in ('missing', 'stale', 'force'):
             refresh = 'stale'
         if max_codes is not None:
