@@ -286,6 +286,20 @@ class StockPoolServer:
         return cleaned
 
     @staticmethod
+    def _clean_cached_valuation(value: Any, field: str, source: Optional[str] = None) -> Optional[float]:
+        number = StockPoolServer._to_number(value)
+        if number is None:
+            return None
+        if field in ('pe_ttm', 'pe_lyr') and abs(number) > 300:
+            return round(number / 100, 4)
+        if field == 'pb' and abs(number) > 100:
+            scaled = number / 100
+            if source == 'eastmoney' and scaled > 20:
+                return None
+            return round(scaled, 4)
+        return number
+
+    @staticmethod
     def _chunked(items, size):
         size = max(1, int(size or 1))
         for i in range(0, len(items), size):
@@ -504,12 +518,18 @@ class StockPoolServer:
                 'latest_main_inflow_pct': fund_flow_result.get('latest_main_inflow_pct'),
             }
 
+        realtime_valuation = self.pool.get_realtime_price(code)
+        if realtime_valuation.get('success') and (
+            realtime_valuation.get('pe_ttm') is not None or realtime_valuation.get('pb') is not None
+        ):
+            self.pool.save_valuation_data(code, realtime_valuation)
         valuation_data = self.pool.get_valuation_data(code)
         valuation_summary = None
-        if valuation_data:
-            latest_val = valuation_data[-1] if valuation_data else {}
-            pe_ttm = latest_val.get('pe_ttm')
-            pb = latest_val.get('pb')
+        if realtime_valuation.get('success') or valuation_data:
+            latest_val = realtime_valuation if realtime_valuation.get('success') else (valuation_data[0] if valuation_data else {})
+            source = latest_val.get('data_source') or latest_val.get('api_name')
+            pe_ttm = self._clean_cached_valuation(latest_val.get('pe_ttm'), 'pe_ttm', source)
+            pb = self._clean_cached_valuation(latest_val.get('pb'), 'pb', source)
             market_cap = latest_val.get('market_cap')
             valuation_level = 'unknown'
             if pe_ttm is not None:
@@ -546,7 +566,7 @@ class StockPoolServer:
         codes = self._normalize_codes_argument(arguments.get('codes'), field='codes')
         if len(codes) > 10:
             raise ValidationError("单次最多10只股票；大量股票请由agent分批遍历", field='codes', value=len(codes))
-        include_realtime = arguments.get('include_realtime', False)
+        include_realtime = arguments.get('include_realtime', True)
         results = self.pool.get_latest_data(codes, include_realtime=include_realtime)
         if not results:
             return create_error_response(

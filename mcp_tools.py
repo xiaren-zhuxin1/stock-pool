@@ -207,7 +207,7 @@ TOOLS = [
                     "items": {"type": "string"},
                     "description": "股票代码列表，最多10只"
                 },
-                "include_realtime": {"type": "boolean", "description": "包含实时行情", "default": False}
+                "include_realtime": {"type": "boolean", "description": "包含实时行情，默认开启以避免旧缓存估值误导", "default": True}
             },
             "required": ["codes"]
         }

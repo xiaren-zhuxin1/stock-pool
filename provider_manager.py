@@ -43,7 +43,7 @@ class ProviderManager:
         self._capability_providers: Dict[ProviderCapability, List[str]] = {}
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._cache_ttl: int = self.config.get('cache_ttl', 300)
-        self._enable_cache: bool = self.config.get('enable_cache', True)
+        self._enable_cache: bool = self.config.get('enable_cache', False)
         self._provider_cooldown: Dict[str, datetime] = {}
         self._cooldown_seconds: int = self.config.get('cooldown_seconds', 300)
         self._init_providers()

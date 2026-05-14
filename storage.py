@@ -246,6 +246,10 @@ def save_valuation_data(conn: sqlite3.Connection, code: str, valuation: Dict[str
     cursor = conn.cursor()
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     today = datetime.now().strftime('%Y-%m-%d')
+    data_source = valuation.get('data_source')
+    pe_ttm = normalize_valuation_metric(valuation.get('pe_ttm'), 'pe_ttm', data_source)
+    pe_lyr = normalize_valuation_metric(valuation.get('pe_lyr'), 'pe_lyr', data_source)
+    pb = normalize_valuation_metric(valuation.get('pb'), 'pb', data_source)
     
     missing_fields_json = json.dumps(valuation.get('missing_fields', []), ensure_ascii=False)
     
@@ -254,11 +258,28 @@ def save_valuation_data(conn: sqlite3.Connection, code: str, valuation: Dict[str
         (code, data_date, pe_ttm, pe_lyr, pb, market_cap, circ_market_cap, 
          data_source, data_quality, missing_fields, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (code, today, valuation.get('pe_ttm'), valuation.get('pe_lyr'), 
-          valuation.get('pb'), valuation.get('market_cap'), valuation.get('circ_market_cap'),
-          valuation.get('data_source'), valuation.get('data_quality'), missing_fields_json, now))
+    ''', (code, today, pe_ttm, pe_lyr, 
+          pb, valuation.get('market_cap'), valuation.get('circ_market_cap'),
+          data_source, valuation.get('data_quality'), missing_fields_json, now))
     
     conn.commit()
+
+
+def normalize_valuation_metric(value: Any, field: str, data_source: Optional[str] = None) -> Optional[float]:
+    if value in (None, '', '-'):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if field in ('pe_ttm', 'pe_lyr') and abs(number) > 300:
+        return round(number / 100, 4)
+    if field == 'pb' and abs(number) > 100:
+        scaled = number / 100
+        if data_source == 'eastmoney' and scaled > 20:
+            return None
+        return round(scaled, 4)
+    return number
 
 
 def save_technical_data(conn: sqlite3.Connection, code: str, technical_items: List[Dict[str, Any]]) -> None:
@@ -425,9 +446,9 @@ def get_valuation_data(
     return [{
         'code': r['code'],
         'date': r['data_date'],
-        'pe_ttm': r['pe_ttm'],
-        'pe_lyr': r['pe_lyr'],
-        'pb': r['pb'],
+        'pe_ttm': normalize_valuation_metric(r['pe_ttm'], 'pe_ttm', r['data_source']),
+        'pe_lyr': normalize_valuation_metric(r['pe_lyr'], 'pe_lyr', r['data_source']),
+        'pb': normalize_valuation_metric(r['pb'], 'pb', r['data_source']),
         'ps_ttm': r['ps_ttm'],
         'market_cap': r['market_cap'],
         'circ_market_cap': r['circ_market_cap'],

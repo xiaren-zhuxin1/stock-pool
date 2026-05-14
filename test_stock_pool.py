@@ -134,6 +134,13 @@ class TestMCPToolBoundaries(unittest.TestCase):
         self.assertFalse(realtime_result['success'])
         print("  超量请求被正确拒绝")
 
+    def test_cached_eastmoney_valuation_is_sanitized(self):
+        print("\n[测试] 旧东方财富估值缓存归一化")
+        self.assertEqual(mcp_server.StockPoolServer._clean_cached_valuation(3317, 'pe_ttm', 'eastmoney'), 33.17)
+        self.assertEqual(mcp_server.StockPoolServer._clean_cached_valuation(773, 'pb', 'eastmoney'), 7.73)
+        self.assertIsNone(mcp_server.StockPoolServer._clean_cached_valuation(3458, 'pb', 'eastmoney'))
+        print("  旧估值缓存已归一化")
+
     def test_analyze_stock(self):
         print("\n[测试] 综合分析工具")
         result = mcp_server.handle_tool_call('analyze_stock', {'code': '601138'})
