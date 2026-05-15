@@ -1,4 +1,4 @@
-from .stock_pool import StockDataPool
+from .stock_pool import StockDataPool, RateLimiter, SessionCache
 from .provider_manager import ProviderManager
 from .providers.base import BaseProvider, ProviderCapability, ProviderResult, DataType
 from .providers.eastmoney import EastMoneyProvider
@@ -12,6 +12,8 @@ from .errors import StockPoolError, ValidationError, DataNotFoundError, Logger
 
 __all__ = [
     'StockDataPool',
+    'RateLimiter',
+    'SessionCache',
     'ProviderManager',
     'BaseProvider',
     'ProviderCapability',
