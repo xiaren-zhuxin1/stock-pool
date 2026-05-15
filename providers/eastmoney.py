@@ -37,6 +37,7 @@ class EastMoneyProvider(BaseProvider):
             ProviderCapability.MINUTE_KLINE,
             ProviderCapability.VALUATION,
             ProviderCapability.FUND_FLOW,
+            ProviderCapability.FINANCIAL,
             ProviderCapability.STOCK_LIST,
         ]
 
@@ -310,4 +311,84 @@ class EastMoneyProvider(BaseProvider):
             return self._create_error_result(
                 self._create_error(ErrorType.DATA_ERROR, f"股票列表解析失败: {e}"),
                 DataType.STOCK_LIST,
+            )
+
+    def fetch_financial(self, code: str, report_type: str = 'income') -> ProviderResult:
+        report_map = {
+            'income': 'RPT_DMSK_FN_INCOME',
+            'balance': 'RPT_DMSK_FN_BALANCE',
+            'cashflow': 'RPT_DMSK_FN_CASHFLOW',
+        }
+        
+        report_name = report_map.get(report_type, 'RPT_DMSK_FN_INCOME')
+        
+        url = "https://datacenter-web.eastmoney.com/api/data/v1/get"
+        params = {
+            'sortColumns': 'REPORT_DATE',
+            'sortTypes': '-1',
+            'pageSize': '50',
+            'pageNumber': '1',
+            'reportName': report_name,
+            'columns': 'ALL',
+            'filter': f'(SECURITY_CODE="{code}")',
+        }
+        
+        result = self._json_request(url, params, referer='https://data.eastmoney.com/', data_type=DataType.FINANCIAL)
+        if not result.success:
+            return result
+        
+        try:
+            data = result.data
+            if not data or 'result' not in data or not data['result']:
+                return self._create_error_result(
+                    self._create_error(ErrorType.DATA_ERROR, "未获取到财务数据"),
+                    DataType.FINANCIAL,
+                )
+            
+            records = data['result'].get('data', [])
+            if not records:
+                return self._create_error_result(
+                    self._create_error(ErrorType.DATA_ERROR, "未获取到财务数据"),
+                    DataType.FINANCIAL,
+                )
+            
+            financial_data = []
+            for record in records:
+                item = {
+                    'code': record.get('SECURITY_CODE'),
+                    'name': record.get('SECURITY_NAME_ABBR'),
+                    'report_date': record.get('REPORT_DATE'),
+                    'report_type': report_type,
+                }
+                
+                if report_type == 'income':
+                    item.update({
+                        'revenue': record.get('OPERATE_INCOME'),
+                        'net_profit': record.get('PARENT_NETPROFIT'),
+                        'eps': record.get('BASIC_EPS'),
+                        'roe': record.get('WEIGHTEDROE'),
+                        'gross_margin': record.get('GROSSPROFITMARGIN'),
+                    })
+                elif report_type == 'balance':
+                    item.update({
+                        'total_assets': record.get('TOTALASSETS'),
+                        'total_liability': record.get('TOTALLIAB'),
+                        'total_equity': record.get('PARENTSHARHEQUIRY'),
+                        'current_ratio': record.get('CURRENTRATIO'),
+                    })
+                elif report_type == 'cashflow':
+                    item.update({
+                        'operating_cashflow': record.get('OPERATECASHFLOWPS'),
+                        'investing_cashflow': record.get('INVESTCASHFLOWPS'),
+                        'financing_cashflow': record.get('FINANCECASHFLOWPS'),
+                    })
+                
+                financial_data.append(item)
+            
+            return self._create_result(financial_data, DataType.FINANCIAL,
+                                       {'report_type': report_type, 'count': len(financial_data)})
+        except Exception as e:
+            return self._create_error_result(
+                self._create_error(ErrorType.DATA_ERROR, f"财务数据解析失败: {e}"),
+                DataType.FINANCIAL,
             )
