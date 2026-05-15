@@ -54,35 +54,18 @@ class RateLimiter:
 
 
 class SessionCache:
-    """会话级LRU缓存"""
+    """会话级LRU缓存 - 缓存持久存在，由agent决定何时清理"""
     
     def __init__(self, max_size: int = 500):
         self.max_size = max_size
         self._cache = OrderedDict()
         self._timestamps = {}
-        self._ttl = {
-            'kline': 300,
-            'minute': 300,
-            'realtime': 0,
-            'fund_flow': 600,
-            'financial': 3600,
-            'position': 300,
-            'stock_list': 3600,
-        }
         self._lock = threading.Lock()
     
     def get(self, key: str, data_type: str = 'default') -> Optional[Any]:
         with self._lock:
             if key not in self._cache:
                 return None
-            
-            ttl = self._ttl.get(data_type, 0)
-            if ttl > 0:
-                cached_time = self._timestamps.get(key, 0)
-                if time.time() - cached_time > ttl:
-                    del self._cache[key]
-                    del self._timestamps[key]
-                    return None
             
             self._cache.move_to_end(key)
             return self._cache[key]
@@ -95,20 +78,33 @@ class SessionCache:
             self._cache[key] = value
             self._timestamps[key] = time.time()
             
-            if data_type in self._ttl and self._ttl[data_type] == 0:
-                del self._cache[key]
-                del self._timestamps[key]
-            
             while len(self._cache) > self.max_size:
                 oldest = next(iter(self._cache))
                 del self._cache[oldest]
                 if oldest in self._timestamps:
                     del self._timestamps[oldest]
     
-    def clear(self):
+    def clear(self, pattern: str = None):
+        """清理缓存，可指定模式匹配"""
         with self._lock:
-            self._cache.clear()
-            self._timestamps.clear()
+            if pattern is None:
+                self._cache.clear()
+                self._timestamps.clear()
+            else:
+                keys_to_delete = [k for k in self._cache if pattern in k]
+                for k in keys_to_delete:
+                    del self._cache[k]
+                    if k in self._timestamps:
+                        del self._timestamps[k]
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """获取缓存统计信息"""
+        with self._lock:
+            return {
+                'total_items': len(self._cache),
+                'max_size': self.max_size,
+                'keys': list(self._cache.keys())[:20],
+            }
 
 
 class StockDataPool:
@@ -864,7 +860,33 @@ class StockDataPool:
             'results': page,
         }
     
-    def clear_cache(self):
-        """清空会话缓存"""
-        self.cache.clear()
-        logger.info("会话缓存已清空")
+    def clear_cache(self, pattern: str = None) -> Dict[str, Any]:
+        """清空会话缓存
+        
+        Args:
+            pattern: 可选的模式匹配，如 'kline_' 清理所有K线缓存，None 表示清空全部
+        
+        Returns:
+            清理结果
+        """
+        stats_before = self.cache.get_stats()
+        self.cache.clear(pattern)
+        logger.info(f"会话缓存已清空: pattern={pattern}, 清理前={stats_before['total_items']}条")
+        
+        return {
+            'success': True,
+            'message': f"缓存已清空" + (f" (匹配: {pattern})" if pattern else " (全部)"),
+            'cleared_items': stats_before['total_items'],
+            'pattern': pattern,
+        }
+    
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """获取缓存统计信息"""
+        stats = self.cache.get_stats()
+        return {
+            'success': True,
+            'total_items': stats['total_items'],
+            'max_size': stats['max_size'],
+            'recent_keys': stats['keys'],
+            'usage_pct': round(stats['total_items'] / stats['max_size'] * 100, 1) if stats['max_size'] > 0 else 0,
+        }

@@ -271,4 +271,27 @@ TOOLS = [
         }
     },
 
+    # ==================== 缓存管理工具 ====================
+    {
+        "name": "clear_cache",
+        "description": "清理会话缓存。当需要获取最新数据或缓存数据可能过期时调用。可指定模式匹配清理特定类型缓存，如 'kline_' 清理所有K线缓存，不传参数则清空全部。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "可选的模式匹配，如 'kline_' 清理K线缓存，'realtime_' 清理行情缓存，不传则清空全部"
+                }
+            }
+        }
+    },
+    {
+        "name": "get_cache_stats",
+        "description": "获取会话缓存统计信息。返回缓存条目数、使用率、最近的缓存键等。用于判断是否需要清理缓存。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
+    },
+
 ]

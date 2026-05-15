@@ -52,24 +52,13 @@ class TestSessionCache(unittest.TestCase):
         cache.set('key1', 'value1', 'kline')
         self.assertEqual(cache.get('key1', 'kline'), 'value1')
     
-    def test_cache_ttl(self):
-        import time
-        cache = SessionCache()
-        cache._ttl['test'] = 0.1
-        
-        cache.set('key1', 'value1', 'test')
-        self.assertEqual(cache.get('key1', 'test'), 'value1')
-        
-        time.sleep(0.2)
-        self.assertIsNone(cache.get('key1', 'test'))
-    
-    def test_cache_no_ttl(self):
+    def test_cache_persistent(self):
         cache = SessionCache()
         
         cache.set('key1', 'value1', 'realtime')
-        self.assertIsNone(cache.get('key1', 'realtime'))
+        self.assertEqual(cache.get('key1', 'realtime'), 'value1')
     
-    def test_cache_clear(self):
+    def test_cache_clear_all(self):
         cache = SessionCache()
         
         cache.set('key1', 'value1', 'kline')
@@ -79,6 +68,31 @@ class TestSessionCache(unittest.TestCase):
         
         self.assertIsNone(cache.get('key1', 'kline'))
         self.assertIsNone(cache.get('key2', 'kline'))
+    
+    def test_cache_clear_pattern(self):
+        cache = SessionCache()
+        
+        cache.set('kline_601138', 'data1', 'kline')
+        cache.set('kline_600487', 'data2', 'kline')
+        cache.set('realtime_601138', 'data3', 'realtime')
+        
+        cache.clear('kline_')
+        
+        self.assertIsNone(cache.get('kline_601138', 'kline'))
+        self.assertIsNone(cache.get('kline_600487', 'kline'))
+        self.assertEqual(cache.get('realtime_601138', 'realtime'), 'data3')
+    
+    def test_cache_stats(self):
+        cache = SessionCache()
+        
+        cache.set('key1', 'value1', 'kline')
+        cache.set('key2', 'value2', 'kline')
+        
+        stats = cache.get_stats()
+        
+        self.assertEqual(stats['total_items'], 2)
+        self.assertIn('key1', stats['keys'])
+        self.assertIn('key2', stats['keys'])
 
 
 class TestStockDataPool(unittest.TestCase):
@@ -182,6 +196,49 @@ class TestPartialSuccess(unittest.TestCase):
         self.assertIn('success_count', result)
         self.assertIn('failed_count', result)
         self.assertIn('partial', result)
+
+
+class TestCacheManagement(unittest.TestCase):
+    
+    def setUp(self):
+        self.pool = StockDataPool()
+    
+    def test_get_cache_stats(self):
+        result = self.pool.get_cache_stats()
+        
+        self.assertTrue(result.get('success'))
+        self.assertIn('total_items', result)
+        self.assertIn('max_size', result)
+        self.assertIn('usage_pct', result)
+    
+    def test_clear_cache_all(self):
+        self.pool.cache.set('key1', 'value1', 'kline')
+        self.pool.cache.set('key2', 'value2', 'kline')
+        
+        result = self.pool.clear_cache()
+        
+        self.assertTrue(result.get('success'))
+        self.assertEqual(result['cleared_items'], 2)
+    
+    def test_clear_cache_pattern(self):
+        self.pool.cache.set('kline_601138', 'data1', 'kline')
+        self.pool.cache.set('kline_600487', 'data2', 'kline')
+        self.pool.cache.set('realtime_601138', 'data3', 'realtime')
+        
+        result = self.pool.clear_cache('kline_')
+        
+        self.assertTrue(result.get('success'))
+        self.assertEqual(result['pattern'], 'kline_')
+    
+    def test_mcp_clear_cache(self):
+        result = handle_tool_call('clear_cache', {})
+        
+        self.assertTrue(result.get('success'))
+    
+    def test_mcp_get_cache_stats(self):
+        result = handle_tool_call('get_cache_stats', {})
+        
+        self.assertTrue(result.get('success'))
 
 
 if __name__ == '__main__':

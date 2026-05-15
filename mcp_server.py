@@ -318,6 +318,15 @@ class StockPoolServer:
     def _handle_screen_market(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         return self.pool.screen_market(arguments)
     
+    def _handle_clear_cache(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        pattern = arguments.get('pattern')
+        result = self.pool.clear_cache(pattern)
+        return create_success_response(result)
+    
+    def _handle_get_cache_stats(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        result = self.pool.get_cache_stats()
+        return create_success_response(result)
+    
     def handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         handlers = {
             'get_current_time': self._handle_get_current_time,
@@ -333,6 +342,8 @@ class StockPoolServer:
             'get_stock_detail': self._handle_get_stock_detail,
             'analyze_intraday': self._handle_analyze_intraday,
             'screen_market': self._handle_screen_market,
+            'clear_cache': self._handle_clear_cache,
+            'get_cache_stats': self._handle_get_cache_stats,
         }
         
         handler = handlers.get(name)
