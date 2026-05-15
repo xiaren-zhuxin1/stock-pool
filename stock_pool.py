@@ -1,13 +1,23 @@
 """
-简化的股票数据池 - 纯实时API调用，无缓存
+StockDataPool v3 - 实时优先 + 会话缓存 + 多源降级
+
+核心原则：
+1. 实时优先 - 每次会话重新获取，无脏数据
+2. 按需历史 - 需要时才获取历史K线
+3. 会话缓存 - 同一会话内避免重复请求
+4. 多源降级 - 主数据源限流时自动切换
+5. 部分成功 - 部分失败时返回可用结果
+6. 限流控制 - 内置请求限流器
 """
 import time
+import threading
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+from collections import OrderedDict
 
 from provider_manager import ProviderManager
 from indicators import (
-    calculate_ma, calculate_technical_indicators, ema, rsi,
+    calculate_ma, calculate_technical_indicators,
     calculate_returns, calculate_volume_analysis,
     generate_technical_signals, calculate_support_resistance
 )
@@ -16,15 +26,115 @@ from errors import ValidationError, logger
 SHANGHAI_TZ = timezone(timedelta(hours=8), name='Asia/Shanghai')
 
 
-class StockDataPool:
-    """纯实时API调用的股票数据池，无数据库缓存"""
+class RateLimiter:
+    """请求限流器"""
     
-    def __init__(self):
-        self.api = ProviderManager()
+    def __init__(self, max_requests: int = 30, window: int = 60):
+        self.max_requests = max_requests
+        self.window = window
+        self.requests = []
+        self._lock = threading.Lock()
+    
+    def acquire(self, wait: bool = True) -> Tuple[bool, float]:
+        """获取请求许可，返回 (是否可以继续, 需要等待的秒数)"""
+        with self._lock:
+            now = time.time()
+            self.requests = [t for t in self.requests if now - t < self.window]
+            
+            if len(self.requests) >= self.max_requests:
+                wait_time = self.window - (now - self.requests[0]) + 0.1
+                if wait:
+                    time.sleep(wait_time)
+                    self.requests = [t for t in self.requests if time.time() - t < self.window]
+                else:
+                    return False, wait_time
+            
+            self.requests.append(time.time())
+            return True, 0
+
+
+class SessionCache:
+    """会话级LRU缓存"""
+    
+    def __init__(self, max_size: int = 500):
+        self.max_size = max_size
+        self._cache = OrderedDict()
+        self._timestamps = {}
+        self._ttl = {
+            'kline': 300,
+            'minute': 300,
+            'realtime': 0,
+            'fund_flow': 600,
+            'financial': 3600,
+            'position': 300,
+            'stock_list': 3600,
+        }
+        self._lock = threading.Lock()
+    
+    def get(self, key: str, data_type: str = 'default') -> Optional[Any]:
+        with self._lock:
+            if key not in self._cache:
+                return None
+            
+            ttl = self._ttl.get(data_type, 0)
+            if ttl > 0:
+                cached_time = self._timestamps.get(key, 0)
+                if time.time() - cached_time > ttl:
+                    del self._cache[key]
+                    del self._timestamps[key]
+                    return None
+            
+            self._cache.move_to_end(key)
+            return self._cache[key]
+    
+    def set(self, key: str, value: Any, data_type: str = 'default'):
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+            
+            self._cache[key] = value
+            self._timestamps[key] = time.time()
+            
+            if data_type in self._ttl and self._ttl[data_type] == 0:
+                del self._cache[key]
+                del self._timestamps[key]
+            
+            while len(self._cache) > self.max_size:
+                oldest = next(iter(self._cache))
+                del self._cache[oldest]
+                if oldest in self._timestamps:
+                    del self._timestamps[oldest]
+    
+    def clear(self):
+        with self._lock:
+            self._cache.clear()
+            self._timestamps.clear()
+
+
+class StockDataPool:
+    """实时优先的股票数据池，支持会话缓存和多源降级"""
+    
+    PROVIDER_PRIORITY = {
+        'realtime': ['eastmoney', 'sina', 'tencent'],
+        'kline': ['eastmoney'],
+        'minute': ['eastmoney'],
+        'fund_flow': ['eastmoney'],
+        'financial': ['eastmoney'],
+        'stock_list': ['eastmoney'],
+    }
+    
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.config = config or {}
+        self.api = ProviderManager(self.config.get('providers', {}))
+        self.cache = SessionCache()
+        self.rate_limiter = RateLimiter(
+            max_requests=self.config.get('rate_limit', 30),
+            window=60
+        )
+        logger.info("StockDataPool v3 初始化完成（实时优先+会话缓存）")
     
     @staticmethod
     def get_current_time_info(now: Optional[datetime] = None) -> Dict[str, Any]:
-        """返回北京时间与A股交易时段状态"""
         if now is None:
             now = datetime.now(SHANGHAI_TZ)
         elif now.tzinfo is None:
@@ -64,66 +174,161 @@ class StockDataPool:
             'trading_session': trading_session,
         }
     
-    def get_realtime_quotes(self, codes: List[str], delay: float = 0.2) -> List[Dict[str, Any]]:
-        """批量获取实时行情"""
+    def _fetch_with_fallback(self, data_type: str, fetch_func, *args, **kwargs) -> Any:
+        """多数据源降级获取"""
+        providers = self.PROVIDER_PRIORITY.get(data_type, ['eastmoney'])
+        last_error = None
+        
+        for provider_name in providers:
+            try:
+                result = fetch_func(provider_name, *args, **kwargs)
+                if result and result.success:
+                    return result
+                if result and result.error:
+                    last_error = result.error.message
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"{provider_name} 获取 {data_type} 失败: {e}")
+        
+        return None
+    
+    def _validate_kline(self, klines: List[Dict]) -> Tuple[bool, str]:
+        """验证K线数据有效性"""
+        if not klines:
+            return False, "K线数据为空"
+        
+        if len(klines) < 10:
+            return False, f"K线数据不足: 仅{len(klines)}条"
+        
+        for i, item in enumerate(klines[:5]):
+            required = ['open', 'high', 'low', 'close']
+            missing = [k for k in required if k not in item or item[k] is None]
+            if missing:
+                return False, f"第{i}条数据缺少字段: {missing}"
+            
+            try:
+                high = float(item['high'])
+                low = float(item['low'])
+                if high < low:
+                    return False, f"第{i}条数据异常: 最高价{high} < 最低价{low}"
+            except (ValueError, TypeError):
+                return False, f"第{i}条数据格式错误"
+        
+        return True, ""
+    
+    def get_realtime_quotes(self, codes: List[str], delay: float = 0.2) -> Dict[str, Any]:
+        """批量获取实时行情（部分成功机制）"""
         results = []
+        failed = []
+        
         for code in codes:
+            cache_key = f"realtime_{code}"
+            cached = self.cache.get(cache_key, 'realtime')
+            
+            if cached:
+                results.append(cached)
+                continue
+            
+            self.rate_limiter.acquire()
             result = self.api.fetch_realtime(code)
+            
             if result.success and result.data:
-                results.append({
+                data = {
                     'code': code,
                     'success': True,
                     **result.data,
                     'provider': result.provider_name,
-                })
+                }
+                results.append(data)
             else:
                 err_msg = result.error.message if result.error else '未知错误'
-                results.append({
-                    'code': code,
-                    'success': False,
-                    'error': err_msg,
-                })
-            if delay:
+                failed.append({'code': code, 'error': err_msg})
+            
+            if delay > 0:
                 time.sleep(delay)
-        return results
-    
-    def get_daily_kline(self, code: str, days: int = 250, 
-                        start_date: Optional[str] = None,
-                        end_date: Optional[str] = None) -> List[Dict[str, Any]]:
-        """获取日K线数据"""
-        result = self.api.fetch_daily_kline(code, days)
-        if not result.success or not result.data:
-            return []
         
-        klines = []
-        for line in result.data:
-            if isinstance(line, str):
-                parts = line.split(',')
-                if len(parts) >= 7:
-                    klines.append({
-                        'date': parts[0],
-                        'open': float(parts[1]) if parts[1] else None,
-                        'close': float(parts[2]) if parts[2] else None,
-                        'high': float(parts[3]) if parts[3] else None,
-                        'low': float(parts[4]) if parts[4] else None,
-                        'volume': float(parts[5]) if parts[5] else None,
-                        'amount': float(parts[6]) if parts[6] else None,
-                    })
-            elif isinstance(line, dict):
-                klines.append(line)
+        return {
+            'success': len(results) > 0,
+            'results': results,
+            'failed': failed,
+            'partial': len(failed) > 0 and len(results) > 0,
+            'total': len(codes),
+            'success_count': len(results),
+            'failed_count': len(failed),
+        }
+    
+    def get_daily_kline(self, code: str, days: int = 250,
+                        start_date: Optional[str] = None,
+                        end_date: Optional[str] = None) -> Dict[str, Any]:
+        """获取日K线数据"""
+        cache_key = f"kline_{code}_{days}"
+        cached = self.cache.get(cache_key, 'kline')
+        
+        if cached:
+            klines = cached
+        else:
+            self.rate_limiter.acquire()
+            result = self.api.fetch_daily_kline(code, days)
+            
+            if not result.success or not result.data:
+                return {
+                    'success': False,
+                    'code': code,
+                    'error': result.error.message if result and result.error else '获取K线失败',
+                }
+            
+            klines = []
+            for line in result.data:
+                if isinstance(line, str):
+                    parts = line.split(',')
+                    if len(parts) >= 7:
+                        klines.append({
+                            'date': parts[0],
+                            'open': float(parts[1]) if parts[1] else None,
+                            'close': float(parts[2]) if parts[2] else None,
+                            'high': float(parts[3]) if parts[3] else None,
+                            'low': float(parts[4]) if parts[4] else None,
+                            'volume': float(parts[5]) if parts[5] else None,
+                            'amount': float(parts[6]) if parts[6] else None,
+                        })
+                elif isinstance(line, dict):
+                    klines.append(line)
+            
+            valid, msg = self._validate_kline(klines)
+            if not valid:
+                return {'success': False, 'code': code, 'error': f'K线数据无效: {msg}'}
+            
+            self.cache.set(cache_key, klines, 'kline')
         
         if start_date:
             klines = [k for k in klines if k.get('date', '') >= start_date]
         if end_date:
             klines = [k for k in klines if k.get('date', '') <= end_date]
         
-        return klines
+        return {
+            'success': True,
+            'code': code,
+            'count': len(klines),
+            'klines': klines,
+        }
     
-    def get_minute_kline(self, code: str, klt: int = 5, days: int = 5) -> List[Dict[str, Any]]:
+    def get_minute_kline(self, code: str, klt: int = 5, days: int = 5) -> Dict[str, Any]:
         """获取分钟K线数据"""
+        cache_key = f"minute_{code}_{klt}_{days}"
+        cached = self.cache.get(cache_key, 'minute')
+        
+        if cached:
+            return {'success': True, 'code': code, 'count': len(cached), 'klines': cached}
+        
+        self.rate_limiter.acquire()
         result = self.api.fetch_minute_kline(code, klt, days)
+        
         if not result.success or not result.data:
-            return []
+            return {
+                'success': False,
+                'code': code,
+                'error': result.error.message if result and result.error else '获取分钟K线失败',
+            }
         
         klines = []
         for line in result.data:
@@ -142,35 +347,53 @@ class StockDataPool:
             elif isinstance(line, dict):
                 klines.append(line)
         
-        return klines
+        self.cache.set(cache_key, klines, 'minute')
+        
+        return {'success': True, 'code': code, 'count': len(klines), 'klines': klines}
     
-    def get_fund_flow(self, code: str, days: int = 10) -> List[Dict[str, Any]]:
+    def get_fund_flow(self, code: str, days: int = 10) -> Dict[str, Any]:
         """获取资金流向数据"""
+        cache_key = f"fund_flow_{code}_{days}"
+        cached = self.cache.get(cache_key, 'fund_flow')
+        
+        if cached:
+            return {'success': True, 'code': code, 'count': len(cached), 'data': cached}
+        
+        self.rate_limiter.acquire()
         result = self.api.fetch_fund_flow(code, days)
+        
         if not result.success or not result.data:
-            return []
-        return result.data
+            return {
+                'success': False,
+                'code': code,
+                'error': result.error.message if result and result.error else '获取资金流向失败',
+            }
+        
+        self.cache.set(cache_key, result.data, 'fund_flow')
+        
+        return {'success': True, 'code': code, 'count': len(result.data), 'data': result.data}
     
     def analyze_main_force(self, code: str, days: int = 10) -> Dict[str, Any]:
         """分析主力资金"""
-        fund_flow_data = self.get_fund_flow(code, days)
+        fund_flow_result = self.get_fund_flow(code, days)
         
-        if not fund_flow_data:
+        if not fund_flow_result.get('success'):
             return {
                 'code': code,
                 'success': False,
-                'error': '无资金流向数据'
+                'error': fund_flow_result.get('error', '无资金流向数据')
             }
+        
+        fund_flow_data = fund_flow_result.get('data', [])
+        
+        if not fund_flow_data:
+            return {'code': code, 'success': False, 'error': '无资金流向数据'}
         
         main_inflows = [item['main_net_inflow'] for item in fund_flow_data if item.get('main_net_inflow')]
         main_inflow_pcts = [item['main_net_inflow_pct'] for item in fund_flow_data if item.get('main_net_inflow_pct')]
         
         if not main_inflows:
-            return {
-                'code': code,
-                'success': False,
-                'error': '无有效主力资金数据'
-            }
+            return {'code': code, 'success': False, 'error': '无有效主力资金数据'}
         
         total_main_inflow = sum(main_inflows)
         avg_main_inflow = total_main_inflow / len(main_inflows)
@@ -210,25 +433,66 @@ class StockDataPool:
             'strength': 'strong' if abs(avg_main_inflow_pct) > 5 else 'medium' if abs(avg_main_inflow_pct) > 2 else 'weak'
         }
     
-    def get_stock_list(self, board: str = 'a_share') -> List[Dict[str, Any]]:
+    def get_stock_list(self, board: str = 'a_share') -> Dict[str, Any]:
         """获取股票列表"""
+        cache_key = f"stock_list_{board}"
+        cached = self.cache.get(cache_key, 'stock_list')
+        
+        if cached:
+            return {'success': True, 'board': board, 'count': len(cached), 'stocks': cached}
+        
+        self.rate_limiter.acquire()
         result = self.api.fetch_stock_list(board)
+        
         if not result.success or not result.data:
-            return []
-        return result.data
+            return {
+                'success': False,
+                'board': board,
+                'error': result.error.message if result and result.error else '获取股票列表失败',
+            }
+        
+        self.cache.set(cache_key, result.data, 'stock_list')
+        
+        return {'success': True, 'board': board, 'count': len(result.data), 'stocks': result.data}
     
     def get_financial_data(self, code: str, report_type: str = 'income') -> Dict[str, Any]:
         """获取财务数据"""
+        cache_key = f"financial_{code}_{report_type}"
+        cached = self.cache.get(cache_key, 'financial')
+        
+        if cached:
+            return {'success': True, 'code': code, 'report_type': report_type, 'data': cached}
+        
+        self.rate_limiter.acquire()
         result = self.api.fetch_financial(code, report_type)
+        
         if not result.success or not result.data:
-            return {}
-        return result.data
+            return {
+                'success': False,
+                'code': code,
+                'error': result.error.message if result and result.error else '获取财务数据失败',
+            }
+        
+        self.cache.set(cache_key, result.data, 'financial')
+        
+        return {'success': True, 'code': code, 'report_type': report_type, 'data': result.data}
     
-    def analyze_position(self, codes: List[str]) -> List[Dict[str, Any]]:
-        """分析52周位置"""
+    def analyze_position(self, codes: List[str]) -> Dict[str, Any]:
+        """分析52周位置（部分成功机制）"""
         results = []
+        failed = []
+        
         for code in codes:
+            cache_key = f"position_{code}"
+            cached = self.cache.get(cache_key, 'position')
+            
+            if cached:
+                results.append(cached)
+                continue
+            
+            self.rate_limiter.acquire()
             result = self.api.fetch_realtime(code)
+            
             if result.success and result.data:
                 data = result.data
                 high_52w = data.get('high_52w')
@@ -239,20 +503,31 @@ class StockDataPool:
                 if high_52w and low_52w and price and high_52w > low_52w:
                     position_pct = round((price - low_52w) / (high_52w - low_52w) * 100, 2)
                 
-                results.append({
+                pos_data = {
                     'code': code,
                     'name': data.get('name'),
                     'price': price,
                     'high_52w': high_52w,
                     'low_52w': low_52w,
                     'position_pct': position_pct,
-                })
+                }
+                results.append(pos_data)
+                self.cache.set(cache_key, pos_data, 'position')
             else:
-                results.append({
+                failed.append({
                     'code': code,
                     'error': result.error.message if result.error else '获取失败',
                 })
-        return results
+        
+        return {
+            'success': len(results) > 0,
+            'results': results,
+            'failed': failed,
+            'partial': len(failed) > 0 and len(results) > 0,
+            'total': len(codes),
+            'success_count': len(results),
+            'failed_count': len(failed),
+        }
     
     def analyze_intraday(self, code: str, date: Optional[str] = None) -> Dict[str, Any]:
         """日内走势分析"""
@@ -270,19 +545,19 @@ class StockDataPool:
                 }
             }
         
-        minute_data = self.get_minute_kline(code, klt=1, days=1)
-        if not minute_data:
+        minute_result = self.get_minute_kline(code, klt=1, days=1)
+        if not minute_result.get('success'):
             return {
                 'success': False,
                 'error': {
                     'code': 'NO_MINUTE_DATA',
-                    'message': '未获取到分钟数据',
+                    'message': minute_result.get('error', '未获取到分钟数据'),
                     'severity': 'error',
                     'recoverable': True,
-                    'suggested_action': '请检查股票代码是否正确',
                 }
             }
         
+        minute_data = minute_result.get('klines', [])
         prices = [m['close'] for m in minute_data if m.get('close')]
         volumes = [m['volume'] for m in minute_data if m.get('volume')]
         
@@ -315,21 +590,17 @@ class StockDataPool:
         """综合分析股票"""
         realtime_result = self.api.fetch_realtime(code)
         if not realtime_result.success or not realtime_result.data:
-            return {
-                'success': False,
-                'code': code,
-                'error': '无法获取股票数据',
-            }
+            return {'success': False, 'code': code, 'error': '无法获取股票数据'}
         
         realtime = realtime_result.data
         
-        kline_data = self.get_daily_kline(code, days=250)
-        if not kline_data:
-            return {
-                'success': False,
-                'code': code,
-                'error': '无法获取K线数据',
-            }
+        kline_result = self.get_daily_kline(code, days=250)
+        if not kline_result.get('success'):
+            return {'success': False, 'code': code, 'error': kline_result.get('error', '无法获取K线数据')}
+        
+        kline_data = kline_result.get('klines', [])
+        if len(kline_data) < 100:
+            return {'success': False, 'code': code, 'error': f'K线数据不足: 仅{len(kline_data)}条'}
         
         kline_sorted = sorted(kline_data, key=lambda x: x.get('date', ''))
         closes = [float(r['close']) for r in kline_sorted if r.get('close')]
@@ -337,13 +608,10 @@ class StockDataPool:
         lows = [float(r['low']) for r in kline_sorted if r.get('low')]
         volumes = [float(r.get('volume') or 0) for r in kline_sorted]
         
-        # 计算技术指标
-        from datetime import datetime as dt
-        rows = [(k.get('date'), k.get('open'), k.get('high'), k.get('low'), 
+        rows = [(k.get('date'), k.get('open'), k.get('high'), k.get('low'),
                  k.get('close'), k.get('volume')) for k in kline_sorted]
-        technical_indicators = calculate_technical_indicators(rows, dt.now().strftime('%Y-%m-%d %H:%M:%S'))
+        technical_indicators = calculate_technical_indicators(rows, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
         
-        # 生成技术信号
         tech_signals = generate_technical_signals(technical_indicators) if technical_indicators else {'signals': [], 'overall': 'neutral', 'score': 50}
         
         returns_analysis = calculate_returns(closes)
@@ -379,13 +647,6 @@ class StockDataPool:
             else:
                 valuation_level = 'expensive'
         
-        valuation_summary = {
-            'pe_ttm': pe_ttm,
-            'pb': pb,
-            'market_cap_yi': round(market_cap / 100000000, 2) if market_cap else None,
-            'valuation_level': valuation_level,
-        }
-        
         return {
             'success': True,
             'code': code,
@@ -396,14 +657,23 @@ class StockDataPool:
             'volume_analysis': volume_analysis,
             'support_resistance': support_resistance,
             'fund_flow': fund_flow_summary,
-            'valuation': valuation_summary,
+            'valuation': {
+                'pe_ttm': pe_ttm,
+                'pb': pb,
+                'market_cap_yi': round(market_cap / 100000000, 2) if market_cap else None,
+                'valuation_level': valuation_level,
+            },
         }
     
-    def get_latest_data(self, codes: List[str]) -> List[Dict[str, Any]]:
-        """获取最新综合数据"""
+    def get_latest_data(self, codes: List[str]) -> Dict[str, Any]:
+        """获取最新综合数据（部分成功机制）"""
         results = []
+        failed = []
+        
         for code in codes:
+            self.rate_limiter.acquire()
             result = self.api.fetch_realtime(code)
+            
             if result.success and result.data:
                 data = result.data
                 high_52w = data.get('high_52w')
@@ -430,25 +700,30 @@ class StockDataPool:
                     'position_pct': position_pct,
                 })
             else:
-                results.append({
+                failed.append({
                     'code': code,
                     'error': result.error.message if result.error else '获取失败',
                 })
-        return results
+        
+        return {
+            'success': len(results) > 0,
+            'results': results,
+            'failed': failed,
+            'partial': len(failed) > 0 and len(results) > 0,
+            'total': len(codes),
+            'success_count': len(results),
+            'failed_count': len(failed),
+        }
     
     def get_stock_detail(self, code: str, fund_flow_days: int = 10) -> Dict[str, Any]:
         """获取股票详情"""
         realtime_result = self.api.fetch_realtime(code)
         if not realtime_result.success or not realtime_result.data:
-            return {
-                'success': False,
-                'code': code,
-                'error': '无法获取股票信息',
-            }
+            return {'success': False, 'code': code, 'error': '无法获取股票信息'}
         
         realtime = realtime_result.data
-        latest_list = self.get_latest_data([code])
-        latest = latest_list[0] if latest_list else None
+        latest_result = self.get_latest_data([code])
+        latest = latest_result.get('results', [None])[0] if latest_result.get('success') else None
         fund_flow = self.analyze_main_force(code, fund_flow_days)
         
         result = {
@@ -481,7 +756,7 @@ class StockDataPool:
     def screen_market(self, criteria: Dict[str, Any]) -> Dict[str, Any]:
         """市场筛选"""
         board = criteria.get('board', 'a_share')
-        limit = criteria.get('limit', 50)
+        limit = min(criteria.get('limit', 50), 100)
         offset = criteria.get('offset', 0)
         
         filters = {
@@ -491,71 +766,105 @@ class StockDataPool:
             'pb_max': criteria.get('pb_max'),
             'market_cap_min': criteria.get('market_cap_min'),
             'market_cap_max': criteria.get('market_cap_max'),
+            'position_min': criteria.get('position_min'),
+            'position_max': criteria.get('position_max'),
         }
         
-        for key in ('market_cap_min', 'market_cap_max'):
-            if filters[key] is not None:
-                filters[key] *= 100000000
+        if filters['position_min'] is not None and 0 < filters['position_min'] <= 1:
+            filters['position_min'] *= 100
+        if filters['position_max'] is not None and 0 < filters['position_max'] <= 1:
+            filters['position_max'] *= 100
         
         has_filter = any(v is not None for v in filters.values())
         if not has_filter:
-            return {
-                'success': False,
-                'error': '市场筛选必须提供至少一个筛选条件',
-            }
+            return {'success': False, 'error': '市场筛选必须提供至少一个筛选条件'}
         
-        universe_result = self.api.fetch_stock_list(board)
-        if not universe_result.success or not universe_result.data:
-            return {
-                'success': False,
-                'error': '无法获取股票列表',
-            }
+        stock_list_result = self.get_stock_list(board)
+        if not stock_list_result.get('success'):
+            return {'success': False, 'error': stock_list_result.get('error', '获取股票列表失败')}
+        
+        stocks = stock_list_result.get('stocks', [])
+        
+        need_position = filters['position_min'] is not None or filters['position_max'] is not None
         
         matched = []
-        for row in universe_result.data:
-            pe_ttm = row.get('pe_ttm')
-            pb = row.get('pb')
-            market_cap = row.get('market_cap')
+        for stock in stocks:
+            pe = stock.get('pe_ttm')
+            pb = stock.get('pb')
+            market_cap = stock.get('market_cap')
             
-            if filters['pe_ttm_min'] is not None and (pe_ttm is None or pe_ttm < filters['pe_ttm_min']):
-                continue
-            if filters['pe_ttm_max'] is not None and (pe_ttm is None or pe_ttm > filters['pe_ttm_max']):
-                continue
+            if filters['pe_ttm_min'] is not None or filters['pe_ttm_max'] is not None:
+                if pe is None or pe < 0:
+                    continue
+                if filters['pe_ttm_min'] is not None and pe < filters['pe_ttm_min']:
+                    continue
+                if filters['pe_ttm_max'] is not None and pe > filters['pe_ttm_max']:
+                    continue
+            
             if filters['pb_min'] is not None and (pb is None or pb < filters['pb_min']):
                 continue
             if filters['pb_max'] is not None and (pb is None or pb > filters['pb_max']):
                 continue
-            if filters['market_cap_min'] is not None and (market_cap is None or market_cap < filters['market_cap_min']):
+            
+            if filters['market_cap_min'] is not None and (market_cap is None or market_cap < filters['market_cap_min'] * 1e8):
                 continue
-            if filters['market_cap_max'] is not None and (market_cap is None or market_cap > filters['market_cap_max']):
+            if filters['market_cap_max'] is not None and (market_cap is None or market_cap > filters['market_cap_max'] * 1e8):
                 continue
             
-            matched.append({
-                'code': row.get('code'),
-                'name': row.get('name'),
-                'price': row.get('close'),
-                'pe_ttm': pe_ttm,
-                'pb': pb,
-                'market_cap': market_cap,
-            })
+            matched.append(stock)
+        
+        if need_position and matched:
+            codes = [s['code'] for s in matched[:50]]
+            position_result = self.analyze_position(codes)
+            
+            if position_result.get('success'):
+                position_map = {p['code']: p.get('position_pct') for p in position_result.get('results', [])}
+                
+                filtered = []
+                for stock in matched:
+                    pos = position_map.get(stock['code'])
+                    if pos is None:
+                        continue
+                    if filters['position_min'] is not None and pos < filters['position_min']:
+                        continue
+                    if filters['position_max'] is not None and pos > filters['position_max']:
+                        continue
+                    stock['position_pct'] = pos
+                    filtered.append(stock)
+                matched = filtered
         
         sort_by = criteria.get('sort_by', 'pe_ttm')
-        reverse = criteria.get('sort_order', 'asc') == 'desc'
+        if sort_by not in ('pe_ttm', 'pb', 'market_cap', 'position_pct'):
+            sort_by = 'pe_ttm'
         
-        non_null = [m for m in matched if m.get(sort_by) is not None]
-        null_items = [m for m in matched if m.get(sort_by) is None]
+        reverse = criteria.get('sort_order', 'asc') == 'desc'
+        non_null = [s for s in matched if s.get(sort_by) is not None]
+        null_items = [s for s in matched if s.get(sort_by) is None]
         non_null.sort(key=lambda x: x.get(sort_by), reverse=reverse)
         matched = non_null + null_items
         
+        total = len(matched)
         page = matched[offset:offset + limit]
         
         return {
             'success': True,
             'board': board,
-            'matched_count': len(matched),
+            'matched_count': total,
             'returned': len(page),
             'offset': offset,
             'limit': limit,
-            'has_more': (offset + limit) < len(matched),
+            'has_more': (offset + limit) < total,
+            'page_info': {
+                'current_offset': offset,
+                'current_limit': limit,
+                'total_matched': total,
+                'has_more': (offset + limit) < total,
+                'next_offset': offset + limit if (offset + limit) < total else None,
+            },
             'results': page,
         }
+    
+    def clear_cache(self):
+        """清空会话缓存"""
+        self.cache.clear()
+        logger.info("会话缓存已清空")

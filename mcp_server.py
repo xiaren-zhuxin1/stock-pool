@@ -1,12 +1,18 @@
 """
-简化的 MCP 服务器 - 纯实时API调用，无缓存
+MCP 服务器 v3 - 实时优先 + 会话缓存
+
+核心特性：
+1. 实时优先 - 每次会话重新获取，无脏数据
+2. 会话缓存 - 同一会话内避免重复请求
+3. 部分成功 - 部分失败时返回可用结果
+4. 限流控制 - 内置请求限流器
 """
 import asyncio
 import json
 import sys
 import os
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 for _stream in (sys.stdout, sys.stderr):
     try:
@@ -18,7 +24,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
 sys.path.insert(0, parent_dir)
 
-from stock_pool_simple import StockDataPool
+from stock_pool import StockDataPool
 from mcp_tools import TOOLS
 from errors import (
     create_success_response, create_error_response,
@@ -29,18 +35,17 @@ logger = Logger()
 
 
 class StockPoolServer:
-    """简化的股票池服务器 - 纯实时API调用"""
+    """股票池服务器 v3 - 实时优先 + 会话缓存"""
     
-    def __init__(self):
-        self.pool = StockDataPool()
-        logger.info("StockPoolServer 初始化完成（纯实时API模式）")
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        self.pool = StockDataPool(config)
+        logger.info("StockPoolServer v3 初始化完成（实时优先+会话缓存）")
     
     @staticmethod
     def get_current_time_info(now: Optional[datetime] = None) -> Dict[str, Any]:
         return StockDataPool.get_current_time_info(now)
     
-    def _normalize_codes(self, codes_arg, field='codes'):
-        """规范化股票代码参数"""
+    def _normalize_codes(self, codes_arg, field='codes') -> List[str]:
         if not codes_arg:
             raise ValidationError("缺少股票代码", field=field)
         
@@ -76,8 +81,24 @@ class StockPoolServer:
         if len(codes) > 20:
             raise ValidationError("单次最多20只股票", field='codes', value=len(codes))
         
-        results = self.pool.get_realtime_quotes(codes)
-        return create_success_response(results)
+        result = self.pool.get_realtime_quotes(codes)
+        
+        if result.get('partial'):
+            return {
+                'success': True,
+                'partial': True,
+                'message': f"部分成功: {result['success_count']}/{result['total']}",
+                'results': result['results'],
+                'failed': result['failed'],
+            }
+        
+        if not result.get('success'):
+            return create_error_response(
+                message="所有股票行情获取失败",
+                error_code='DATA_NOT_FOUND',
+            )
+        
+        return create_success_response(result['results'])
     
     def _handle_get_daily_kline(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -88,15 +109,21 @@ class StockPoolServer:
         start_date = arguments.get('start_date')
         end_date = arguments.get('end_date')
         
-        data = self.pool.get_daily_kline(code, days, start_date, end_date)
-        if not data:
+        result = self.pool.get_daily_kline(code, days, start_date, end_date)
+        
+        if not result.get('success'):
             return create_error_response(
-                message=f"未获取到 {code} 的日K线数据",
+                message=result.get('error', f"未获取到 {code} 的日K线数据"),
                 error_code='DATA_NOT_FOUND',
                 recoverable=True,
                 suggested_action="请检查股票代码是否正确",
             )
-        return create_success_response(data)
+        
+        return create_success_response({
+            'code': code,
+            'count': result['count'],
+            'klines': result['klines'],
+        })
     
     def _handle_get_minute_kline(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -106,15 +133,21 @@ class StockPoolServer:
         klt = arguments.get('klt', 5)
         days = arguments.get('days', 5)
         
-        data = self.pool.get_minute_kline(code, klt, days)
-        if not data:
+        result = self.pool.get_minute_kline(code, klt, days)
+        
+        if not result.get('success'):
             return create_error_response(
-                message=f"未获取到 {code} 的分钟K线数据",
+                message=result.get('error', f"未获取到 {code} 的分钟K线数据"),
                 error_code='DATA_NOT_FOUND',
                 recoverable=True,
                 suggested_action="非交易时段无分钟数据",
             )
-        return create_success_response(data)
+        
+        return create_success_response({
+            'code': code,
+            'count': result['count'],
+            'klines': result['klines'],
+        })
     
     def _handle_get_fund_flow(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -123,35 +156,38 @@ class StockPoolServer:
         
         limit = arguments.get('limit', 10)
         
-        data = self.pool.get_fund_flow(code, limit)
-        if not data:
+        result = self.pool.get_fund_flow(code, limit)
+        
+        if not result.get('success'):
             return create_error_response(
-                message=f"未获取到 {code} 的资金流向数据",
+                message=result.get('error', f"未获取到 {code} 的资金流向数据"),
                 error_code='DATA_NOT_FOUND',
                 recoverable=True,
                 suggested_action="部分小盘股/新股可能无资金流向数据",
             )
         
         analysis = self.pool.analyze_main_force(code, limit)
-        result = {
+        
+        return create_success_response({
             'code': code,
-            'fund_flow': data,
+            'fund_flow': result['data'],
             'analysis': analysis if analysis.get('success') else None,
-        }
-        return create_success_response(result)
+        })
     
     def _handle_get_stock_list(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         board = arguments.get('board', 'a_share')
         page = arguments.get('page', 1)
-        page_size = arguments.get('page_size', 100)
+        page_size = min(arguments.get('page_size', 100), 100)
         
-        stocks = self.pool.get_stock_list(board)
-        if not stocks:
+        result = self.pool.get_stock_list(board)
+        
+        if not result.get('success'):
             return create_error_response(
-                message="未获取到股票列表",
+                message=result.get('error', "未获取到股票列表"),
                 error_code='DATA_NOT_FOUND',
             )
         
+        stocks = result['stocks']
         start = (page - 1) * page_size
         end = start + page_size
         page_stocks = stocks[start:end]
@@ -170,22 +206,39 @@ class StockPoolServer:
             raise ValidationError("缺少股票代码", field='code')
         
         report_type = arguments.get('report_type', 'income')
-        data = self.pool.get_financial_data(code, report_type)
+        result = self.pool.get_financial_data(code, report_type)
         
-        if not data:
+        if not result.get('success'):
             return create_error_response(
-                message=f"未获取到 {code} 的财务数据",
+                message=result.get('error', f"未获取到 {code} 的财务数据"),
                 error_code='DATA_NOT_FOUND',
             )
-        return create_success_response(data)
+        
+        return create_success_response(result['data'])
     
     def _handle_analyze_position(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         codes = self._normalize_codes(arguments.get('codes'))
-        if len(codes) > 100:
-            raise ValidationError("单次最多100只股票", field='codes', value=len(codes))
+        if len(codes) > 20:
+            raise ValidationError("单次最多20只股票", field='codes', value=len(codes))
         
         result = self.pool.analyze_position(codes)
-        return create_success_response(result)
+        
+        if result.get('partial'):
+            return {
+                'success': True,
+                'partial': True,
+                'message': f"部分成功: {result['success_count']}/{result['total']}",
+                'results': result['results'],
+                'failed': result['failed'],
+            }
+        
+        if not result.get('success'):
+            return create_error_response(
+                message="所有股票位置分析失败",
+                error_code='DATA_NOT_FOUND',
+            )
+        
+        return create_success_response(result['results'])
     
     def _handle_analyze_stock(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -200,20 +253,32 @@ class StockPoolServer:
                 message=result.get('error', '分析失败'),
                 error_code='ANALYSIS_FAILED',
             )
+        
         return create_success_response(result)
     
     def _handle_get_latest_data(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         codes = self._normalize_codes(arguments.get('codes'))
-        if len(codes) > 30:
-            raise ValidationError("单次最多30只股票", field='codes', value=len(codes))
+        if len(codes) > 10:
+            raise ValidationError("单次最多10只股票", field='codes', value=len(codes))
         
-        results = self.pool.get_latest_data(codes)
-        if not results:
+        result = self.pool.get_latest_data(codes)
+        
+        if result.get('partial'):
+            return {
+                'success': True,
+                'partial': True,
+                'message': f"部分成功: {result['success_count']}/{result['total']}",
+                'results': result['results'],
+                'failed': result['failed'],
+            }
+        
+        if not result.get('success'):
             return create_error_response(
-                message="未获取到任何股票数据",
+                message="所有股票数据获取失败",
                 error_code='DATA_NOT_FOUND',
             )
-        return create_success_response(results)
+        
+        return create_success_response(result['results'])
     
     def _handle_get_stock_detail(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
         code = arguments.get('code')
@@ -228,6 +293,7 @@ class StockPoolServer:
                 message=result.get('error', '获取详情失败'),
                 error_code='DATA_NOT_FOUND',
             )
+        
         return create_success_response(result)
     
     def _handle_analyze_intraday(self, arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -253,7 +319,6 @@ class StockPoolServer:
         return self.pool.screen_market(arguments)
     
     def handle_tool_call(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        """处理工具调用"""
         handlers = {
             'get_current_time': self._handle_get_current_time,
             'get_realtime_quotes': self._handle_get_realtime_quotes,
@@ -293,12 +358,10 @@ server = StockPoolServer()
 
 
 def handle_tool_call(name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """模块级入口"""
     return server.handle_tool_call(name, arguments)
 
 
 async def handle_request(request):
-    """处理MCP请求"""
     method = request.get("method")
     request_id = request.get("id")
     is_notification = "id" not in request
@@ -312,7 +375,7 @@ async def handle_request(request):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "stock-pool-simple", "version": "3.0.0"},
+                "serverInfo": {"name": "stock-pool-v3", "version": "3.0.0"},
             }
         }
     elif method == "tools/list":
@@ -331,7 +394,6 @@ async def handle_request(request):
 
 
 async def main():
-    """主循环"""
     while True:
         request_id = None
         try:
