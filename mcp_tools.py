@@ -9,12 +9,12 @@ MCP工具定义 - 面向agent的精简接口
 5. 错误提示明确：区分永久错误(代码错误)和临时错误(网络/限流)
 6. 工具精简合并，减少agent的选择负担
 
-工具分类（16个）：
+工具分类（15个）：
 - 系统工具: get_current_time
 - 行情工具: get_realtime_quotes, get_daily_kline, get_minute_kline
 - 分析工具: analyze_stock, analyze_position, analyze_intraday
 - 数据工具: get_fund_flow, get_financial_data, get_latest_data, get_stock_detail
-- 筛选工具: screen_market, screen_position, get_stock_list, get_data_coverage, sync_history_batch
+- 筛选工具: screen_market, get_stock_list, get_data_coverage, sync_history_batch
 """
 
 TOOLS = [
@@ -170,24 +170,6 @@ TOOLS = [
                 "market_cap_min": {"type": "number", "description": "总市值下限(亿)"},
                 "market_cap_max": {"type": "number", "description": "总市值上限(亿)"},
                 "sort_by": {"type": "string", "description": "排序字段: pe_ttm/pb/market_cap/close/code/name", "default": "pe_ttm"},
-                "sort_order": {"type": "string", "description": "排序方向: asc/desc", "default": "asc"},
-                "limit": {"type": "integer", "description": "返回数量，默认20，最大50", "default": 20, "maximum": 50},
-                "offset": {"type": "integer", "description": "分页偏移量", "default": 0}
-            }
-        }
-    },
-    {
-        "name": "screen_position",
-        "description": "按本地52周位置筛选全市场股票。只有数据覆盖率达到阈值才执行；默认要求position覆盖率95%。覆盖不足会返回错误，并建议先分批补历史数据。",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "board": {"type": "string", "description": "板块：a_share/main/gem/star/hs_a/bse", "default": "a_share"},
-                "position_min": {"type": "number", "description": "52周位置下限(%)"},
-                "position_max": {"type": "number", "description": "52周位置上限(%)"},
-                "min_coverage_pct": {"type": "number", "description": "最低覆盖率阈值，默认95", "default": 95},
-                "min_daily_rows": {"type": "integer", "description": "认为日K覆盖有效的最少记录数，默认240", "default": 240, "maximum": 500},
-                "allow_local_universe": {"type": "boolean", "description": "允许仅对本地股票池做位置筛选；默认false，避免误认为全市场", "default": False},
                 "sort_order": {"type": "string", "description": "排序方向: asc/desc", "default": "asc"},
                 "limit": {"type": "integer", "description": "返回数量，默认20，最大50", "default": 20, "maximum": 50},
                 "offset": {"type": "integer", "description": "分页偏移量", "default": 0}

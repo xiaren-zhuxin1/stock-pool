@@ -68,7 +68,6 @@
 | 工具 | 说明 |
 |------|------|
 | screen_market | 按在线估值、市值筛选全市场股票 |
-| screen_position | 覆盖率达标后按本地52周位置筛选 |
 | get_data_coverage | 查看日K、技术指标、52周位置覆盖率 |
 | sync_history_batch | 小批量补全历史日K和技术指标，支持断点续跑 |
 | get_stock_list | 分页获取板块股票列表 |
@@ -137,7 +136,7 @@ result = pool.screen_market({
 2. **全市场估值/市值筛选用 `screen_market`**：并提供至少一个筛选条件；52周位置优先对候选股用 `analyze_position`
 3. **个股分析用 `analyze_stock`**：一次调用获取完整分析
 4. **小批量获取用 `get_latest_data`**：最多10只，大量由agent分批遍历
-5. **全市场52周位置筛选先看 `get_data_coverage`**：覆盖率不足时用 `sync_history_batch` 小批量补全；在线股票列表不可用时不得把本地股票池当全市场
+5. **52周位置筛选用 `screen_market` 的 position 参数**：先按估值/市值筛选候选，再对候选股用 `analyze_position` 获取精确位置
 
 ### 推荐流程
 
@@ -195,6 +194,6 @@ export TUSHARE_TOKEN=your_token
 ## 注意事项
 
 1. API有调用限制，建议设置适当延迟
-2. 52周位置依赖历史K线；不要用 `screen_market` 做全市场52周位置筛选，先筛候选再调用 `analyze_position`
+2. 52周位置依赖历史K线；`screen_market` 支持 position 筛选，但仅对前50只候选股计算；如需全量位置分析，先筛候选再调用 `analyze_position`
 3. TuShare为付费服务，需配置Token
 4. 项目日志输出到stderr，不影响MCP通信
