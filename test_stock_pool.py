@@ -11,6 +11,7 @@ sys.path.insert(0, parent_dir)
 
 from stock_pool import StockDataPool, RateLimiter, SessionCache
 from mcp_server import StockPoolServer, handle_tool_call
+from providers.base import ProviderResult
 
 
 class TestRateLimiter(unittest.TestCase):
@@ -138,6 +139,76 @@ class TestStockDataPool(unittest.TestCase):
         
         self.assertFalse(result.get('success'))
         self.assertIn('error', result)
+
+    def test_calculate_52w_position_from_kline(self):
+        klines = [
+            {'date': '2026-01-01', 'high': 11.0, 'low': 9.0},
+            {'date': '2026-01-02', 'high': 12.0, 'low': 8.0},
+            {'date': '2026-01-03', 'high': 10.0, 'low': 9.5},
+        ]
+        result = self.pool._calculate_52w_position('000001', price=10.0, klines=klines)
+
+        self.assertEqual(result['high_52w'], 12.0)
+        self.assertEqual(result['low_52w'], 8.0)
+        self.assertEqual(result['position_pct'], 50.0)
+
+    def test_analyze_position_uses_kline_when_realtime_lacks_52w(self):
+        class FakeApi:
+            def fetch_realtime(self, code):
+                return ProviderResult(
+                    success=True,
+                    data={'code': code, 'name': 'Test Bank', 'price': 10.0},
+                    provider_name='sina',
+                )
+
+        self.pool.api = FakeApi()
+        self.pool.get_daily_kline = lambda code, days=250: {
+            'success': True,
+            'klines': [
+                {'date': '2026-01-01', 'high': 11.0, 'low': 9.0},
+                {'date': '2026-01-02', 'high': 12.0, 'low': 8.0},
+            ],
+        }
+
+        result = self.pool.analyze_position(['000001'])
+        position = result['results'][0]
+
+        self.assertEqual(position['high_52w'], 12.0)
+        self.assertEqual(position['low_52w'], 8.0)
+        self.assertEqual(position['position_pct'], 50.0)
+
+    def test_get_latest_data_enriches_missing_valuation_fields(self):
+        class FakeApi:
+            def fetch_realtime(self, code):
+                return ProviderResult(
+                    success=True,
+                    data={'code': code, 'name': 'Test Bank', 'price': 10.0},
+                    provider_name='sina',
+                )
+
+            def fetch_valuation(self, code):
+                return ProviderResult(
+                    success=True,
+                    data={'pe_ttm': 6.5, 'pb': 0.7, 'market_cap': 10000000000},
+                    provider_name='akshare',
+                )
+
+        self.pool.api = FakeApi()
+        self.pool.get_daily_kline = lambda code, days=250: {
+            'success': True,
+            'klines': [
+                {'date': '2026-01-01', 'high': 11.0, 'low': 9.0},
+                {'date': '2026-01-02', 'high': 12.0, 'low': 8.0},
+            ],
+        }
+
+        result = self.pool.get_latest_data(['000001'])
+        latest = result['results'][0]
+
+        self.assertEqual(latest['pe_ttm'], 6.5)
+        self.assertEqual(latest['pb'], 0.7)
+        self.assertEqual(latest['market_cap'], 10000000000)
+        self.assertEqual(latest['position_pct'], 50.0)
 
 
 class TestMCPServer(unittest.TestCase):

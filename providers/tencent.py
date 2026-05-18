@@ -33,6 +33,7 @@ class TencentProvider(BaseProvider):
             ProviderCapability.REALTIME_QUOTE,
             ProviderCapability.DAILY_KLINE,
             ProviderCapability.MINUTE_KLINE,
+            ProviderCapability.VALUATION,
         ]
 
     @property
@@ -45,6 +46,12 @@ class TencentProvider(BaseProvider):
         elif code.startswith(('4', '8')):
             return f"bj{code}"
         return f"sz{code}"
+
+    @staticmethod
+    def _to_float(parts: List[str], index: int, multiplier: float = 1.0) -> Optional[float]:
+        if len(parts) <= index or parts[index] in ('', '-', '--'):
+            return None
+        return float(parts[index]) * multiplier
 
     def fetch_realtime(self, code: str) -> ProviderResult:
         market_code = self._get_market_code(code)
@@ -68,15 +75,18 @@ class TencentProvider(BaseProvider):
             realtime_data = {
                 'code': code,
                 'name': parts[1] if len(parts) > 1 else None,
-                'price': float(parts[3]) if len(parts) > 3 and parts[3] else None,
-                'pre_close': float(parts[4]) if len(parts) > 4 and parts[4] else None,
-                'open': float(parts[5]) if len(parts) > 5 and parts[5] else None,
-                'volume': float(parts[6]) if len(parts) > 6 and parts[6] else None,
-                'high': float(parts[33]) if len(parts) > 33 and parts[33] else None,
-                'low': float(parts[34]) if len(parts) > 34 and parts[34] else None,
-                'amount': float(parts[37]) if len(parts) > 37 and parts[37] else None,
-                'change_pct': float(parts[32]) if len(parts) > 32 and parts[32] else None,
-                'market_cap': float(parts[45]) if len(parts) > 45 and parts[45] else None,
+                'price': self._to_float(parts, 3),
+                'pre_close': self._to_float(parts, 4),
+                'open': self._to_float(parts, 5),
+                'volume': self._to_float(parts, 6),
+                'high': self._to_float(parts, 33),
+                'low': self._to_float(parts, 34),
+                'amount': self._to_float(parts, 37),
+                'change_pct': self._to_float(parts, 32),
+                'pe_ttm': self._to_float(parts, 39),
+                'pb': self._to_float(parts, 46),
+                'market_cap': self._to_float(parts, 45, 100000000),
+                'circ_market_cap': self._to_float(parts, 44, 100000000),
                 'data_source': self.name,
             }
             if realtime_data['price'] and realtime_data['pre_close']:
@@ -188,7 +198,10 @@ class TencentProvider(BaseProvider):
             )
 
     def fetch_valuation(self, code: str) -> ProviderResult:
-        return self._not_supported("估值", DataType.VALUATION)
+        result = self.fetch_realtime(code)
+        if result.success:
+            result.data_type = DataType.VALUATION
+        return result
 
     def fetch_fund_flow(self, code: str, days: int = 100) -> ProviderResult:
         return self._not_supported("资金流向", DataType.FUND_FLOW)

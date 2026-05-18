@@ -138,6 +138,31 @@ class TestTencentProvider(unittest.TestCase):
         self.assertEqual(result.data['name'], '浦发银行')
         self.assertEqual(result.data['price'], 10.05)
 
+    @patch('providers.base.requests.get')
+    def test_fetch_valuation_success(self, mock_get):
+        parts = [''] * 60
+        parts[1] = 'Test Bank'
+        parts[3] = '7.19'
+        parts[4] = '7.24'
+        parts[5] = '7.24'
+        parts[6] = '2343903'
+        parts[32] = '-0.69'
+        parts[33] = '7.25'
+        parts[34] = '7.16'
+        parts[37] = '168745'
+        parts[39] = '6.90'
+        parts[44] = '19385.12'
+        parts[45] = '25625.61'
+        parts[46] = '0.66'
+        mock_response = MockResponse(text_data=f'v_sh600000="{ "~".join(parts) }";')
+        mock_get.return_value = mock_response
+
+        result = self.provider.fetch_valuation('600000')
+        self.assertTrue(result.success)
+        self.assertEqual(result.data['pe_ttm'], 6.90)
+        self.assertEqual(result.data['pb'], 0.66)
+        self.assertEqual(result.data['market_cap'], 25625.61 * 100000000)
+
 
 class TestProviderResult(unittest.TestCase):
     def test_success_result(self):

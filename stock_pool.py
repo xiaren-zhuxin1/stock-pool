@@ -211,7 +211,74 @@ class StockDataPool:
                 return False, f"第{i}条数据格式错误"
         
         return True, ""
-    
+
+    def _enrich_quote_data(self, code: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Fill missing valuation fields from providers that support valuation."""
+        enriched = dict(data or {})
+        valuation_fields = ('pe_ttm', 'pb', 'market_cap', 'circ_market_cap')
+        if all(enriched.get(field) not in (None, '', '-') for field in valuation_fields):
+            return enriched
+
+        result = self.api.fetch_valuation(code)
+        if not result.success or not result.data:
+            return enriched
+
+        for field in valuation_fields:
+            if enriched.get(field) in (None, '', '-'):
+                value = result.data.get(field)
+                if value not in (None, '', '-'):
+                    enriched[field] = value
+
+        if result.provider_name:
+            enriched['valuation_provider'] = result.provider_name
+
+        return enriched
+
+    def _calculate_52w_position(
+        self,
+        code: str,
+        price: Optional[float] = None,
+        klines: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Calculate 52-week high/low from daily K-line data."""
+        if klines is None:
+            kline_result = self.get_daily_kline(code, days=250)
+            if not kline_result.get('success'):
+                return {'high_52w': None, 'low_52w': None, 'position_pct': None}
+            klines = kline_result.get('klines', [])
+
+        rows = sorted(klines, key=lambda item: item.get('date', ''))[-250:]
+        highs = []
+        lows = []
+        for row in rows:
+            try:
+                high = row.get('high')
+                low = row.get('low')
+                if high is not None:
+                    highs.append(float(high))
+                if low is not None:
+                    lows.append(float(low))
+            except (TypeError, ValueError):
+                continue
+
+        high_52w = max(highs) if highs else None
+        low_52w = min(lows) if lows else None
+
+        position_pct = None
+        try:
+            numeric_price = float(price) if price is not None else None
+        except (TypeError, ValueError):
+            numeric_price = None
+
+        if high_52w and low_52w and numeric_price is not None and high_52w > low_52w:
+            position_pct = round((numeric_price - low_52w) / (high_52w - low_52w) * 100, 2)
+
+        return {
+            'high_52w': high_52w,
+            'low_52w': low_52w,
+            'position_pct': position_pct,
+        }
+
     def get_realtime_quotes(self, codes: List[str], delay: float = 0.2) -> Dict[str, Any]:
         """批量获取实时行情（部分成功机制）"""
         results = []
@@ -494,12 +561,12 @@ class StockDataPool:
             
             if result.success and result.data:
                 data = result.data
-                high_52w = data.get('high_52w')
-                low_52w = data.get('low_52w')
                 price = data.get('price')
-                
-                position_pct = None
-                if high_52w and low_52w and price and high_52w > low_52w:
+                position = self._calculate_52w_position(code, price)
+                high_52w = position.get('high_52w') or data.get('high_52w')
+                low_52w = position.get('low_52w') or data.get('low_52w')
+                position_pct = position.get('position_pct')
+                if position_pct is None and high_52w and low_52w and price and high_52w > low_52w:
                     position_pct = round((price - low_52w) / (high_52w - low_52w) * 100, 2)
                 
                 pos_data = {
@@ -591,7 +658,7 @@ class StockDataPool:
         if not realtime_result.success or not realtime_result.data:
             return {'success': False, 'code': code, 'error': '无法获取股票数据'}
         
-        realtime = realtime_result.data
+        realtime = self._enrich_quote_data(code, realtime_result.data)
         
         kline_result = self.get_daily_kline(code, days=250)
         if not kline_result.get('success'):
@@ -674,13 +741,13 @@ class StockDataPool:
             result = self.api.fetch_realtime(code)
             
             if result.success and result.data:
-                data = result.data
-                high_52w = data.get('high_52w')
-                low_52w = data.get('low_52w')
+                data = self._enrich_quote_data(code, result.data)
                 price = data.get('price')
-                
-                position_pct = None
-                if high_52w and low_52w and price and high_52w > low_52w:
+                position = self._calculate_52w_position(code, price)
+                high_52w = position.get('high_52w') or data.get('high_52w')
+                low_52w = position.get('low_52w') or data.get('low_52w')
+                position_pct = position.get('position_pct')
+                if position_pct is None and high_52w and low_52w and price and high_52w > low_52w:
                     position_pct = round((price - low_52w) / (high_52w - low_52w) * 100, 2)
                 
                 results.append({
