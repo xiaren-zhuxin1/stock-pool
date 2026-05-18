@@ -317,7 +317,10 @@ class StockDataPool:
             return {'success': True, 'code': code, 'count': len(cached), 'klines': cached}
         
         self.rate_limiter.acquire()
-        result = self.api.fetch_minute_kline(code, klt, days)
+        result = self.api.fetch_minute_kline(
+            code, klt, days,
+            providers=self.PROVIDER_PRIORITY.get('minute')
+        )
         
         if not result.success or not result.data:
             return {

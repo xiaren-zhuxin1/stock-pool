@@ -8,6 +8,7 @@ MCP 服务器 v3 - 实时优先 + 会话缓存
 4. 限流控制 - 内置请求限流器
 """
 import asyncio
+import contextlib
 import json
 import sys
 import os
@@ -395,7 +396,11 @@ async def handle_request(request):
         params = request.get("params", {})
         name = params.get("name")
         arguments = params.get("arguments", {})
-        result = server.handle_tool_call(name, arguments)
+        # MCP stdio requires stdout to contain only JSON-RPC frames. Some
+        # third-party market-data libraries print diagnostics directly, so
+        # route that noise to stderr while a tool is running.
+        with contextlib.redirect_stdout(sys.stderr):
+            result = server.handle_tool_call(name, arguments)
         return {
             "jsonrpc": "2.0", "id": request_id,
             "result": {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, default=str)}]},
